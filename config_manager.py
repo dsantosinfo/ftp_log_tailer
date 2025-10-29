@@ -7,8 +7,12 @@ KEY_FILE = 'secret.key'
 
 class ConfigManager:
     """
-    Gerencia as configurações de conexão FTP e Favoritos, salvando-as em config.json
-    e criptografando/descriptografando senhas de sites usando uma chave Fernet.
+    Gerencia as configurações de:
+    1. Sites (conexões FTP)
+    2. Favoritos (Log Tailer)
+    3. Sync Jobs (Folder Watcher)
+    
+    Salva tudo em config.json e gerencia a criptografia.
     """
 
     def __init__(self):
@@ -17,7 +21,6 @@ class ConfigManager:
         self.configs = self._load_configs()
 
     def _load_or_generate_key(self) -> bytes:
-        """Carrega a chave de criptografia ou gera uma nova se não existir."""
         if os.path.exists(KEY_FILE):
             with open(KEY_FILE, 'rb') as f:
                 return f.read()
@@ -29,56 +32,49 @@ class ConfigManager:
             return key
 
     def _load_configs(self) -> dict:
-        """Carrega o arquivo config.json, garantindo que 'sites' e 'favorites' existam."""
+        """Carrega o config.json, garantindo que as chaves principais existam."""
         if not os.path.exists(CONFIG_FILE):
             print(f"Arquivo de configuração não encontrado. Criando {CONFIG_FILE}...")
-            default_configs = {"sites": {}, "favorites": {}}
+            default_configs = {"sites": {}, "favorites": {}, "sync_jobs": {}} # Adicionado sync_jobs
             self._save_configs(default_configs)
             return default_configs
         
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Garante que as chaves principais existam
                 data.setdefault('sites', {})
                 data.setdefault('favorites', {})
+                data.setdefault('sync_jobs', {}) # Garante que exista
                 return data
         except json.JSONDecodeError:
             print(f"Erro ao ler {CONFIG_FILE}. O arquivo pode estar corrompido.")
-            return {"sites": {}, "favorites": {}} # Retorna backup vazio
+            return {"sites": {}, "favorites": {}, "sync_jobs": {}} # Backup vazio
 
     def _save_configs(self, data: dict):
-        """Salva o dicionário de configurações no arquivo config.json."""
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4)
         except IOError as e:
             print(f"Erro crítico ao salvar configurações em {CONFIG_FILE}: {e}")
 
-    # --- Métodos de Criptografia ---
+    # --- Criptografia ---
 
     def encrypt_password(self, password: str) -> str:
-        """Criptografa uma senha em texto plano."""
         return self.fernet.encrypt(password.encode('utf-8')).decode('utf-8')
 
     def decrypt_password(self, encrypted_password: str) -> str:
-        """Descriptografa uma senha."""
         try:
             return self.fernet.decrypt(encrypted_password.encode('utf-8')).decode('utf-8')
         except Exception as e:
-            print(f"Erro ao descriptografar senha (a chave pode ter mudado ou o dado está corrompido): {e}")
+            print(f"Erro ao descriptografar senha: {e}")
             return ""
 
-    # --- Métodos de Sites ---
+    # --- Sites ---
 
     def get_sites(self) -> dict:
-        """Retorna o dicionário de sites configurados."""
         return self.configs.get('sites', {})
 
     def get_site_details(self, site_name: str) -> dict:
-        """
-        Retorna os detalhes de um site específico, já com a senha descriptografada.
-        """
         site = self.get_sites().get(site_name)
         if not site:
             return {}
@@ -92,76 +88,85 @@ class ConfigManager:
         return site_details
 
     def save_site(self, site_name: str, host: str, user: str, password_plain: str, port: int):
-        """Salva ou atualiza um site, criptografando a senha."""
         if not site_name or not host or not user:
             raise ValueError("Nome do Site, Host e Usuário são obrigatórios.")
 
-        if 'sites' not in self.configs:
-            self.configs['sites'] = {}
-            
-        encrypted_pass = self.encrypt_password(password_plain)
-        
         self.configs['sites'][site_name] = {
             'ftp_host': host,
             'ftp_user': user,
-            'ftp_password_encrypted': encrypted_pass,
+            'ftp_password_encrypted': self.encrypt_password(password_plain),
             'ftp_port': port
         }
         self._save_configs(self.configs)
-        print(f"Site '{site_name}' salvo com sucesso.")
 
     def delete_site(self, site_name: str):
-        """Remove um site da configuração."""
         if 'sites' in self.configs and site_name in self.configs['sites']:
             del self.configs['sites'][site_name]
+            
+            # Limpa favoritos e sync_jobs associados
+            self._cleanup_on_site_delete(site_name)
+            
             self._save_configs(self.configs)
             print(f"Site '{site_name}' removido com sucesso.")
 
-            # (NOVO) Limpa favoritos associados a este site
-            favorites_to_delete = []
-            for fav_name, details in self.get_favorites().items():
-                if details.get('site_name') == site_name:
-                    favorites_to_delete.append(fav_name)
-            
-            if favorites_to_delete:
-                print(f"Limpando {len(favorites_to_delete)} favoritos associados ao site '{site_name}'...")
-                for fav_name in favorites_to_delete:
-                    self.delete_favorite(fav_name, save=False) # Não salva ainda
-                self._save_configs(self.configs) # Salva uma vez no final
+    def _cleanup_on_site_delete(self, site_name: str):
+        """Limpa entradas em 'favorites' e 'sync_jobs' que referenciavam o site excluído."""
+        favs_to_del = [name for name, d in self.get_favorites().items() if d.get('site_name') == site_name]
+        for name in favs_to_del:
+            del self.configs['favorites'][name]
+            print(f"Favorito '{name}' removido (site órfão).")
 
-        else:
-            print(f"Site '{site_name}' não encontrado para remoção.")
+        jobs_to_del = [name for name, d in self.get_sync_jobs().items() if d.get('site_name') == site_name]
+        for name in jobs_to_del:
+            del self.configs['sync_jobs'][name]
+            print(f"Sync Job '{name}' removido (site órfão).")
 
-    # --- Métodos de Favoritos (NOVOS) ---
+    # --- Favoritos (Log Tailer) ---
 
     def get_favorites(self) -> dict:
-        """Retorna o dicionário de favoritos."""
         return self.configs.get('favorites', {})
 
     def save_favorite(self, favorite_name: str, site_name: str, remote_path: str):
-        """Salva ou atualiza um favorito."""
         if not all([favorite_name, site_name, remote_path]):
             raise ValueError("Nome do Favorito, Nome do Site e Caminho são obrigatórios.")
-        
         if site_name not in self.get_sites():
-            raise ValueError(f"Site '{site_name}' não encontrado nas configurações.")
+            raise ValueError(f"Site '{site_name}' não encontrado.")
 
-        if 'favorites' not in self.configs:
-            self.configs['favorites'] = {}
-            
         self.configs['favorites'][favorite_name] = {
             'site_name': site_name,
             'remote_path': remote_path
         }
         self._save_configs(self.configs)
-        print(f"Favorito '{favorite_name}' salvo com sucesso.")
 
     def delete_favorite(self, favorite_name: str, save: bool = True):
-        """Remove um favorito da configuração."""
         if 'favorites' in self.configs and favorite_name in self.configs['favorites']:
             del self.configs['favorites'][favorite_name]
             if save:
                 self._save_configs(self.configs)
-            print(f"Favorito '{favorite_name}' removido com sucesso.")
-        else:
-            print(f"Favorito '{favorite_name}' não encontrado para remoção.")
+
+    # --- Sync Jobs (Folder Watcher) (NOVO) ---
+
+    def get_sync_jobs(self) -> dict:
+        """Retorna o dicionário de tarefas de sincronização."""
+        return self.configs.get('sync_jobs', {})
+
+    def save_sync_job(self, job_name: str, site_name: str, local_path: str, remote_path: str):
+        """Salva ou atualiza uma tarefa de sincronização."""
+        if not all([job_name, site_name, local_path, remote_path]):
+            raise ValueError("Todos os campos (Nome, Site, Local, Remoto) são obrigatórios.")
+        if site_name not in self.get_sites():
+            raise ValueError(f"Site '{site_name}' não encontrado nas configurações.")
+        
+        self.configs['sync_jobs'][job_name] = {
+            'site_name': site_name,
+            'local_path': local_path,
+            'remote_path': remote_path
+        }
+        self._save_configs(self.configs)
+
+    def delete_sync_job(self, job_name: str, save: bool = True):
+        """Remove uma tarefa de sincronização."""
+        if 'sync_jobs' in self.configs and job_name in self.configs['sync_jobs']:
+            del self.configs['sync_jobs'][job_name]
+            if save:
+                self._save_configs(self.configs)
