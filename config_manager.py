@@ -2,8 +2,18 @@ import json
 import os
 from cryptography.fernet import Fernet
 
-CONFIG_FILE = 'config.json'
-KEY_FILE = 'secret.key'
+# (NOVO) Definir o local correto para salvar os dados (pasta do usuário)
+# Isso resolve para C:\Users\<Usuario>\AppData\Local\FTP_Utilities
+try:
+    APP_DATA_DIR = os.path.join(os.getenv('LOCALAPPDATA'), 'FTP_Utilities')
+except TypeError:
+     # Fallback caso os.getenv('LOCALAPPDATA') retorne None (raro)
+     # Salva na pasta 'Documentos' do usuário como alternativa
+     APP_DATA_DIR = os.path.join(os.path.expanduser('~'), 'Documents', 'FTP_Utilities')
+
+# (MODIFICADO) Usar caminhos absolutos para a pasta AppData
+CONFIG_FILE = os.path.join(APP_DATA_DIR, 'config.json')
+KEY_FILE = os.path.join(APP_DATA_DIR, 'secret.key')
 
 class ConfigManager:
     """
@@ -12,13 +22,26 @@ class ConfigManager:
     2. Favoritos (Log Tailer)
     3. Sync Jobs (Folder Watcher)
     
-    Salva tudo em config.json e gerencia a criptografia.
+    Salva tudo em config.json (em AppData) e gerencia a criptografia.
     """
 
     def __init__(self):
+        # (NOVO) Garantir que a pasta de configuração exista
+        self._ensure_app_data_dir()
+        
         self.key = self._load_or_generate_key()
         self.fernet = Fernet(self.key)
         self.configs = self._load_configs()
+
+    def _ensure_app_data_dir(self):
+        """Cria o diretório em AppData/Local se não existir."""
+        try:
+            os.makedirs(APP_DATA_DIR, exist_ok=True)
+        except OSError as e:
+            # Se isso falhar, a aplicação não pode continuar.
+            print(f"Erro critico: Nao foi possivel criar o diretorio de dados em {APP_DATA_DIR}: {e}")
+            # Lança uma exceção que será pega pelo __main__
+            raise Exception(f"Nao foi possivel criar o diretorio de dados em {APP_DATA_DIR}. Verifique as permissoes. Erro: {e}")
 
     def _load_or_generate_key(self) -> bytes:
         if os.path.exists(KEY_FILE):
@@ -26,10 +49,16 @@ class ConfigManager:
                 return f.read()
         else:
             key = Fernet.generate_key()
-            with open(KEY_FILE, 'wb') as f:
-                f.write(key)
-            print(f"Nova chave de segurança gerada: {KEY_FILE}")
-            return key
+            try:
+                with open(KEY_FILE, 'wb') as f:
+                    f.write(key)
+                print(f"Nova chave de segurança gerada em: {KEY_FILE}")
+                return key
+            except IOError as e:
+                print(f"ERRO FATAL AO ESCREVER CHAVE: {e}")
+                # Isso será pego pelo __main__ e exibido no MessageBox
+                raise Exception(f"Nao foi possivel escrever a chave em {KEY_FILE}. Verifique as permissoes. Erro: {e}")
+
 
     def _load_configs(self) -> dict:
         """Carrega o config.json, garantindo que as chaves principais existam."""
@@ -49,6 +78,9 @@ class ConfigManager:
         except json.JSONDecodeError:
             print(f"Erro ao ler {CONFIG_FILE}. O arquivo pode estar corrompido.")
             return {"sites": {}, "favorites": {}, "sync_jobs": {}} # Backup vazio
+        except IOError as e:
+            print(f"ERRO FATAL AO LER CONFIG: {e}")
+            raise Exception(f"Nao foi possivel ler a config em {CONFIG_FILE}. Erro: {e}")
 
     def _save_configs(self, data: dict):
         try:
@@ -56,6 +88,7 @@ class ConfigManager:
                 json.dump(data, f, indent=4)
         except IOError as e:
             print(f"Erro crítico ao salvar configurações em {CONFIG_FILE}: {e}")
+            # Em uma app real, poderíamos tentar um fallback ou notificar.
 
     # --- Criptografia ---
 

@@ -3,11 +3,24 @@ from tkinter import ttk, simpledialog, messagebox, scrolledtext, font, filedialo
 import queue
 import threading
 import os
+import sys # (NOVO) Importado para o resource_path
 
 from config_manager import ConfigManager
 from ftp_poller import FTPLogPoller, MSG_TYPE_LOG, MSG_TYPE_STATUS, MSG_TYPE_ERROR
-from ftp_browser import FTPBrowserWindow # <--- Importação (sem mudança)
+from ftp_browser import FTPBrowserWindow 
 from folder_watcher import SyncService, SYNC_MSG_STATUS, SYNC_MSG_SUCCESS, SYNC_MSG_ERROR
+
+# (NOVO) FUNÇÃO PARA GARANTIR QUE O ÍCONE SEJA ENCONTRADO (DEV E EXE)
+def resource_path(relative_path):
+    """ Retorna o caminho absoluto para o recurso, funcionando em dev e no PyInstaller """
+    try:
+        # PyInstaller cria uma pasta temp e armazena o caminho em _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Modo de desenvolvimento (não está no bundle PyInstaller)
+        base_path = os.path.abspath(os.path.dirname(__file__))
+
+    return os.path.join(base_path, relative_path)
 
 class FTPLogTailerApp:
     
@@ -16,25 +29,35 @@ class FTPLogTailerApp:
         self.root.title("Dsantos Info - FTP Utilities (Tailer & Sync)")
         self.root.geometry("1000x750")
 
+        # --- (NOVO) Adicionar Ícone da Janela ---
+        try:
+            # Usamos a função resource_path para garantir que o .exe encontre o ícone
+            icon_path = resource_path("icon.ico")
+            self.root.iconbitmap(icon_path)
+        except Exception as e:
+            # Se falhar (ex: icon.ico não encontrado), apenas loga no console
+            print(f"Aviso: Nao foi possivel carregar o icone da janela: {e}")
+        # --- Fim da Adição ---
+
         self.config_manager = ConfigManager()
         self.log_tailer_queue = queue.Queue()
-        self.folder_sync_queue = queue.Queue() 
-        self.poller_thread = None 
-        self.sync_service_thread = None 
+        self.folder_sync_queue = queue.Queue()  
+        self.poller_thread = None  
+        self.sync_service_thread = None  
         
         self._setup_styles()
         self._create_main_widgets()
         
         self._load_sites_to_combobox()
         self._load_favorites_to_combobox()
-        self._load_sync_jobs_to_treeview() 
+        self._load_sync_jobs_to_treeview()  
         
-        self._start_queues_checker() 
+        self._start_queues_checker()  
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _setup_styles(self):
         self.style = ttk.Style()
-        self.style.theme_use('clam') 
+        self.style.theme_use('clam')  
         self.log_font = font.Font(family="Consolas", size=10)
         self.style.configure("SyncLog.TText", background="#2b2b2b", foreground="#cccccc", font=self.log_font, wrap="word")
         self.style.map("SyncLog.TText", background=[('disabled', '#2b2b2b')], foreground=[('disabled', '#cccccc')])
@@ -45,12 +68,12 @@ class FTPLogTailerApp:
         # --- Aba 1: Log Tailer ---
         self.tab1_frame = ttk.Frame(self.notebook, padding="5")
         self.notebook.add(self.tab1_frame, text=" FTP Log Tailer (Real-time) ")
-        self._create_log_tailer_tab(self.tab1_frame) 
+        self._create_log_tailer_tab(self.tab1_frame)  
         
         # --- Aba 2: Folder Sync ---
         self.tab2_frame = ttk.Frame(self.notebook, padding="5")
         self.notebook.add(self.tab2_frame, text=" Sincronização de Pastas (Watcher) ")
-        self._create_folder_sync_tab(self.tab2_frame) 
+        self._create_folder_sync_tab(self.tab2_frame)  
         
         self.notebook.pack(fill='both', expand=True)
 
@@ -92,7 +115,7 @@ class FTPLogTailerApp:
         ttk.Label(path_frame, text="Caminho do Log:").pack(side=tk.LEFT, padx=(0, 5))
         self.log_path_entry = ttk.Entry(path_frame)
         self.log_path_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(0, 5))
-        self.log_path_entry.insert(0, "/public_html/wp-content/debug.log") 
+        self.log_path_entry.insert(0, "/public_html/wp-content/debug.log")  
         self.log_path_entry.bind("<KeyRelease>", self._on_path_entry_change)
         self.browse_btn = ttk.Button(path_frame, text="Procurar...", command=self._open_ftp_browser, state=tk.DISABLED)
         self.browse_btn.pack(side=tk.LEFT)
@@ -108,9 +131,9 @@ class FTPLogTailerApp:
 
         self.log_display_tailer = scrolledtext.ScrolledText(parent_frame, state=tk.DISABLED)
         self.log_display_tailer.configure(font=self.log_font, bg="#2b2b2b", fg="#cccccc", wrap=tk.WORD, insertbackground="#ffffff")
-        self.log_display_tailer.tag_configure("STATUS", foreground="#808080") 
-        self.log_display_tailer.tag_configure("ERROR", foreground="#ff6347")  
-        self.log_display_tailer.tag_configure("LOG", foreground="#cccccc")   
+        self.log_display_tailer.tag_configure("STATUS", foreground="#808080")  
+        self.log_display_tailer.tag_configure("ERROR", foreground="#ff6347")    
+        self.log_display_tailer.tag_configure("LOG", foreground="#cccccc")     
         self.log_display_tailer.tag_configure("HIGHLIGHT", background="#4a4a4a")
         self.log_display_tailer.pack(fill='both', expand=True, pady=(0, 5))
 
@@ -154,9 +177,9 @@ class FTPLogTailerApp:
 
         self.log_display_sync = scrolledtext.ScrolledText(log_frame, state=tk.DISABLED)
         self.log_display_sync.configure(font=self.log_font, bg="#2b2b2b", fg="#cccccc", wrap=tk.WORD, insertbackground="#ffffff")
-        self.log_display_sync.tag_configure(SYNC_MSG_STATUS, foreground="#808080") 
-        self.log_display_sync.tag_configure(SYNC_MSG_ERROR, foreground="#ff6347")  
-        self.log_display_sync.tag_configure(SYNC_MSG_SUCCESS, foreground="#76c7c0") 
+        self.log_display_sync.tag_configure(SYNC_MSG_STATUS, foreground="#808080")  
+        self.log_display_sync.tag_configure(SYNC_MSG_ERROR, foreground="#ff6347")    
+        self.log_display_sync.tag_configure(SYNC_MSG_SUCCESS, foreground="#76c7c0")  
         self.log_display_sync.pack(fill='both', expand=True)
     
     # --- Lógica de Filas e Threads (Unificado) ---
@@ -167,7 +190,7 @@ class FTPLogTailerApp:
     def _process_queues(self):
         # 1. Processa Fila do Log Tailer (Aba 1)
         try:
-            while True: 
+            while True:  
                 msg_type, message = self.log_tailer_queue.get_nowait()
                 if msg_type == MSG_TYPE_STATUS:
                     self.status_bar.config(text=message)
@@ -179,7 +202,7 @@ class FTPLogTailerApp:
                 elif msg_type == MSG_TYPE_LOG:
                     self._append_log_tailer(message, "LOG")
         except queue.Empty:
-            pass 
+            pass  
         except Exception as e:
             print(f"Erro ao processar fila do Tailer: {e}")
 
@@ -187,23 +210,23 @@ class FTPLogTailerApp:
         try:
             while True:
                 msg_type, message = self.folder_sync_queue.get_nowait()
-                self._append_log_sync(message, msg_type) 
+                self._append_log_sync(message, msg_type)  
                 if "Serviço de Sincronização parado" in message:
                     self._set_sync_ui_state(monitoring=False)
                 elif "Serviço iniciado" in message:
                     self.status_bar.config(text=message)
         except queue.Empty:
-            pass 
+            pass  
         except Exception as e:
             print(f"Erro ao processar fila do Sync: {e}")
         
-        self.root.after(200, self._process_queues) 
+        self.root.after(200, self._process_queues)  
 
     def _on_closing(self):
         self._stop_monitoring()
-        self._stop_sync_service() 
+        self._stop_sync_service()  
         if self.poller_thread:
-            self.poller_thread.join(timeout=1.0) 
+            self.poller_thread.join(timeout=1.0)  
         if self.sync_service_thread:
             self.sync_service_thread.join(timeout=1.0)
         self.root.destroy()
@@ -215,7 +238,7 @@ class FTPLogTailerApp:
         self.site_combo['values'] = sites
         if sites:
             self.site_combo.current(0)
-            self._on_site_selected(None) 
+            self._on_site_selected(None)  
         else:
             self.browse_btn.config(state=tk.DISABLED)
 
@@ -230,7 +253,7 @@ class FTPLogTailerApp:
             self.browse_btn.config(state=tk.NORMAL)
         else:
             self.browse_btn.config(state=tk.DISABLED)
-        self._clear_favorite_selection() 
+        self._clear_favorite_selection()  
 
     def _on_favorite_selected(self, event):
         fav_name = self.fav_combo.get()
@@ -248,7 +271,7 @@ class FTPLogTailerApp:
             self.log_path_entry.delete(0, tk.END)
             self.log_path_entry.insert(0, fav_details.get('remote_path'))
             self.fav_del_btn.config(state=tk.NORMAL)
-            self._on_site_selected(None) 
+            self._on_site_selected(None)  
         else:
             self.fav_del_btn.config(state=tk.DISABLED)
 
@@ -299,7 +322,7 @@ class FTPLogTailerApp:
             try:
                 self.config_manager.save_favorite(fav_name.strip(), site_name, remote_path)
                 self._load_favorites_to_combobox()
-                self.fav_combo.set(fav_name.strip()) 
+                self.fav_combo.set(fav_name.strip())  
                 self.fav_del_btn.config(state=tk.NORMAL)
             except Exception as e:
                 messagebox.showerror("Erro ao Salvar", f"{e}", parent=self.root)
@@ -310,7 +333,7 @@ class FTPLogTailerApp:
         if messagebox.askyesno("Confirmar Exclusão", f"Excluir o favorito '{fav_name}'?", parent=self.root):
             try:
                 self.config_manager.delete_favorite(fav_name)
-                self._load_favorites_to_combobox() 
+                self._load_favorites_to_combobox()  
             except Exception as e:
                 messagebox.showerror("Erro ao Excluir", f"{e}", parent=self.root)
 
@@ -323,9 +346,8 @@ class FTPLogTailerApp:
                 messagebox.showerror("Erro de Configuração", "Não foi possível carregar senha.", parent=self.root)
                 return
             
-            # --- MODIFICAÇÃO CHAVE ---
             # Chama o navegador em modo 'file'
-            FTPBrowserWindow(self.root, site_config, 
+            FTPBrowserWindow(self.root, site_config,  
                              self._on_file_selected_from_browser, mode='file')
             
         except Exception as e:
@@ -335,7 +357,7 @@ class FTPLogTailerApp:
         if selected_path:
             self.log_path_entry.delete(0, tk.END)
             self.log_path_entry.insert(0, selected_path)
-            self._clear_favorite_selection() 
+            self._clear_favorite_selection()  
 
     def _open_site_manager(self):
         SiteManagerWindow(self.root, self.config_manager, self._on_site_manager_close)
@@ -343,7 +365,7 @@ class FTPLogTailerApp:
     def _on_site_manager_close(self):
         """Callback que atualiza TUDO que depende dos sites."""
         self._load_sites_to_combobox()
-        self._load_favorites_to_combobox() 
+        self._load_favorites_to_combobox()  
         self._load_sync_jobs_to_treeview() # Atualiza jobs da Aba 2
         self._clear_favorite_selection()
         if self.site_combo.get() not in self.site_combo['values']:
@@ -362,8 +384,8 @@ class FTPLogTailerApp:
             return
         site_config = self.config_manager.get_site_details(site_name)
         if not site_config.get('ftp_password'):
-             messagebox.showerror("Erro", "Não foi possível carregar senha.", parent=self.root)
-             return
+                 messagebox.showerror("Erro", "Não foi possível carregar senha.", parent=self.root)
+                 return
         try:
             self.poller_thread = FTPLogPoller(site_config, remote_path, self.log_tailer_queue)
             self.poller_thread.start()
@@ -374,7 +396,7 @@ class FTPLogTailerApp:
     def _stop_monitoring(self):
         if self.poller_thread and self.poller_thread.is_alive():
             self.poller_thread.stop()
-        self._set_tailer_ui_state(monitoring=False) 
+        self._set_tailer_ui_state(monitoring=False)  
 
     def _set_tailer_ui_state(self, monitoring: bool):
         state = tk.DISABLED if monitoring else tk.NORMAL
@@ -397,7 +419,7 @@ class FTPLogTailerApp:
              self.log_display_tailer.insert(tk.END, text + '\n', (tag, "HIGHLIGHT"))
         else:
              self.log_display_tailer.insert(tk.END, text + '\n', (tag,))
-        self.log_display_tailer.see(tk.END) 
+        self.log_display_tailer.see(tk.END)  
         self.log_display_tailer.configure(state=tk.DISABLED)
 
     # --- Lógica Específica da Aba 2 (Folder Sync) ---
@@ -406,7 +428,7 @@ class FTPLogTailerApp:
         self.sync_jobs_tree.delete(*self.sync_jobs_tree.get_children())
         jobs = self.config_manager.get_sync_jobs()
         for name, details in jobs.items():
-            self.sync_jobs_tree.insert("", "end", iid=name, text=name, 
+            self.sync_jobs_tree.insert("", "end", iid=name, text=name,  
                 values=(details.get('site_name', 'N/A'), details.get('local_path', 'N/A'), details.get('remote_path', 'N/A'))
             )
         self.sync_del_btn.config(state=tk.DISABLED)
@@ -421,7 +443,7 @@ class FTPLogTailerApp:
         sites = list(self.config_manager.get_sites().keys())
         if not sites:
             messagebox.showwarning("Sem Sites", "Configure um Site (Aba 1 > Gerenciar Sites) antes de adicionar uma tarefa.", parent=self.root)
-            self.notebook.select(self.tab1_frame) 
+            self.notebook.select(self.tab1_frame)  
             self._open_site_manager()
             return
         SyncJobManagerWindow(self.root, self.config_manager, sites, self._load_sync_jobs_to_treeview)
@@ -432,7 +454,7 @@ class FTPLogTailerApp:
         if messagebox.askyesno("Confirmar Exclusão", f"Excluir a tarefa '{selected_iid}'?", parent=self.root):
             try:
                 self.config_manager.delete_sync_job(selected_iid)
-                self._load_sync_jobs_to_treeview() 
+                self._load_sync_jobs_to_treeview()  
             except Exception as e:
                 messagebox.showerror("Erro ao Excluir", f"{e}", parent=self.root)
 
@@ -471,7 +493,7 @@ class FTPLogTailerApp:
         state = tk.DISABLED if monitoring else tk.NORMAL
         self.sync_start_btn.config(state=tk.DISABLED if monitoring else tk.NORMAL)
         self.sync_stop_btn.config(state=tk.NORMAL if monitoring else tk.DISABLED)
-        self.sync_stop_btn.config(text="Parar Sincronização") 
+        self.sync_stop_btn.config(text="Parar Sincronização")  
         self.sync_add_btn.config(state=state)
         self.sync_del_btn.config(state=tk.DISABLED if monitoring else (tk.NORMAL if self.sync_jobs_tree.focus() else tk.DISABLED))
         if not monitoring: self.sync_service_thread = None
@@ -479,7 +501,7 @@ class FTPLogTailerApp:
     def _append_log_sync(self, text: str, tag: str):
         self.log_display_sync.configure(state=tk.NORMAL)
         self.log_display_sync.insert(tk.END, text + '\n', (tag,))
-        self.log_display_sync.see(tk.END) 
+        self.log_display_sync.see(tk.END)  
         self.log_display_sync.configure(state=tk.DISABLED)
 
 
@@ -489,7 +511,7 @@ class SiteManagerWindow(tk.Toplevel):
     def __init__(self, parent, config_manager: ConfigManager, on_close_callback: callable):
         super().__init__(parent)
         self.transient(parent); self.grab_set(); self.title("Gerenciador de Sites FTP"); self.geometry("600x450")
-        self.config_manager = config_manager; self.on_close_callback = on_close_callback; self.current_site_name = None 
+        self.config_manager = config_manager; self.on_close_callback = on_close_callback; self.current_site_name = None  
         self._create_widgets(); self._load_sites_to_listbox(); self.protocol("WM_DELETE_WINDOW", self._on_close)
     def _create_widgets(self):
         main_frame = ttk.Frame(self, padding="10"); main_frame.pack(fill='both', expand=True)
@@ -527,7 +549,7 @@ class SiteManagerWindow(tk.Toplevel):
             self.name_entry.delete(0, tk.END); self.name_entry.insert(0, self.current_site_name)
             self.host_entry.insert(0, site_details.get('ftp_host', '')); self.port_var.set(site_details.get('ftp_port', 21))
             self.user_entry.insert(0, site_details.get('ftp_user', '')); self.pass_entry.insert(0, site_details.get('ftp_password', ''))
-            self.delete_btn.config(state=tk.NORMAL); self.name_entry.config(state=tk.DISABLED) 
+            self.delete_btn.config(state=tk.NORMAL); self.name_entry.config(state=tk.DISABLED)  
         except Exception as e: messagebox.showerror("Erro ao Carregar", f"{e}", parent=self)
     def _clear_form(self, clear_name=True):
         if clear_name: self.name_entry.config(state=tk.NORMAL); self.name_entry.delete(0, tk.END)
@@ -564,8 +586,8 @@ class SyncJobManagerWindow(tk.Toplevel):
     
     def __init__(self, parent, config_manager: ConfigManager, site_list: list, on_close_callback: callable):
         super().__init__(parent)
-        self.transient(parent) 
-        self.grab_set() 
+        self.transient(parent)  
+        self.grab_set()  
         self.title("Adicionar Nova Tarefa de Sincronização")
         self.geometry("600x300")
 
@@ -574,6 +596,13 @@ class SyncJobManagerWindow(tk.Toplevel):
         self.on_close_callback = on_close_callback
         
         self._create_widgets()
+        
+        # (NOVO) Adiciona o ícone também nas janelas filhas
+        try:
+            icon_path = resource_path("icon.ico")
+            self.iconbitmap(icon_path)
+        except Exception:
+            pass # Ignora se falhar
         
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -595,7 +624,7 @@ class SyncJobManagerWindow(tk.Toplevel):
 
         # Pasta Local
         ttk.Label(form_frame, text="Pasta Local (Origem):").grid(row=2, column=0, sticky=tk.W, pady=8)
-        local_frame = ttk.Frame(form_frame) 
+        local_frame = ttk.Frame(form_frame)  
         local_frame.grid(row=2, column=1, sticky=tk.EW, padx=5)
         self.local_path_entry = ttk.Entry(local_frame, width=40)
         self.local_path_entry.pack(side=tk.LEFT, fill='x', expand=True)
@@ -641,7 +670,7 @@ class SyncJobManagerWindow(tk.Toplevel):
                 return
             
             # Chama o navegador em modo 'directory'
-            FTPBrowserWindow(self, site_config, 
+            FTPBrowserWindow(self, site_config,  
                              self._on_remote_folder_selected, mode='directory')
         
         except Exception as e:
