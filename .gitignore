@@ -1,0 +1,47 @@
+# --- Arquivos de Configuração Sensíveis ---
+# NUNCA versione a chave de criptografia!
+secret.key
+
+# Ignore o config.json local que contém senhas reais.
+# (Se você quiser versionar um *exemplo*, chame-o de 'config.example.json')
+config.json
+*.db
+*.sqlite3
+
+# --- Python ---
+# Ambientes virtuais
+venv/
+env/
+.venv/
+ENV/
+*.egg-info/
+
+# Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos de build/dist (PyInstaller)
+dist/
+build/
+*.spec
+*.exe
+
+# --- S.O. Específicos ---
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+desktop.ini
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
