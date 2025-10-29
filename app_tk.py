@@ -1,10 +1,13 @@
 import tkinter as tk
-from tkinter import ttk, simpledialog, messagebox, scrolledtext, font
+from tkinter import ttk, simpledialog, messagebox, scrolledtext, font, filedialog
 import queue
 import threading
 
 from config_manager import ConfigManager
 from ftp_poller import FTPLogPoller, MSG_TYPE_LOG, MSG_TYPE_STATUS, MSG_TYPE_ERROR
+from ftp_browser import FTPBrowserWindow
+
+KEY_FILE = 'secret.key'
 
 class FTPLogTailerApp:
     """
@@ -23,89 +26,292 @@ class FTPLogTailerApp:
         self._setup_styles()
         self._create_main_widgets()
         self._load_sites_to_combobox()
+        self._load_favorites_to_combobox() # NOVO
         self._start_queue_checker()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _setup_styles(self):
-        """Define estilos e fontes customizadas."""
         self.style = ttk.Style()
-        self.style.theme_use('clam') # Um tema mais limpo
+        self.style.theme_use('clam') 
 
-        # Fonte para o log (monospaçada)
         self.log_font = font.Font(family="Consolas", size=10)
         
-        # Tags de cor para o ScrolledText
         self.log_display = scrolledtext.ScrolledText(
             self.root, 
             wrap=tk.WORD, 
             font=self.log_font, 
-            bg="#2b2b2b", # Fundo escuro
-            fg="#cccccc"  # Texto claro
+            bg="#2b2b2b",
+            fg="#cccccc"
         )
         
-        self.log_display.tag_configure("STATUS", foreground="#808080") # Cinza
-        self.log_display.tag_configure("ERROR", foreground="#ff6347")  # Vermelho/Tomate
-        self.log_display.tag_configure("LOG", foreground="#cccccc")   # Padrão (Texto claro)
-        self.log_display.tag_configure("HIGHLIGHT", background="#4a4a4a") # Destaque sutil
+        self.log_display.tag_configure("STATUS", foreground="#808080") 
+        self.log_display.tag_configure("ERROR", foreground="#ff6347")  
+        self.log_display.tag_configure("LOG", foreground="#cccccc")   
+        self.log_display.tag_configure("HIGHLIGHT", background="#4a4a4a") 
 
     def _create_main_widgets(self):
-        """Cria a interface principal."""
+        """Cria a interface principal (Reestruturada para Favoritos)."""
         
         # --- Frame de Configuração (Topo) ---
         config_frame = ttk.Frame(self.root, padding="10")
         config_frame.pack(fill='x')
 
-        # Seleção de Site
-        ttk.Label(config_frame, text="Site:").pack(side=tk.LEFT, padx=(0, 5))
-        self.site_combo = ttk.Combobox(config_frame, state="readonly", width=30)
+        # --- Frame de Favoritos (Linha 1) ---
+        fav_frame = ttk.Frame(config_frame)
+        fav_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(fav_frame, text="Favoritos:").pack(side=tk.LEFT, padx=(0, 5))
+        self.fav_combo = ttk.Combobox(fav_frame, state="readonly", width=40)
+        self.fav_combo.pack(side=tk.LEFT, padx=5, fill='x', expand=True)
+        self.fav_combo.bind("<<ComboboxSelected>>", self._on_favorite_selected)
+
+        self.fav_save_btn = ttk.Button(fav_frame, text="Salvar Favorito...", command=self._save_favorite)
+        self.fav_save_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.fav_del_btn = ttk.Button(fav_frame, text="Excluir Favorito", command=self._delete_favorite, state=tk.DISABLED)
+        self.fav_del_btn.pack(side=tk.LEFT, padx=5)
+
+        # --- Frame de Controle (Linha 2) ---
+        control_frame = ttk.Frame(config_frame)
+        control_frame.pack(fill='x')
+
+        ttk.Label(control_frame, text="Site:").pack(side=tk.LEFT, padx=(0, 5))
+        self.site_combo = ttk.Combobox(control_frame, state="readonly", width=30)
         self.site_combo.pack(side=tk.LEFT, padx=5)
         self.site_combo.bind("<<ComboboxSelected>>", self._on_site_selected)
 
-        # Botão Gerenciar Sites
-        self.manage_sites_btn = ttk.Button(config_frame, text="Gerenciar Sites...", command=self._open_site_manager)
+        self.manage_sites_btn = ttk.Button(control_frame, text="Gerenciar Sites...", command=self._open_site_manager)
         self.manage_sites_btn.pack(side=tk.LEFT, padx=5)
 
-        # Caminho do Log
-        ttk.Label(config_frame, text="Caminho do Log:").pack(side=tk.LEFT, padx=(10, 5))
-        self.log_path_entry = ttk.Entry(config_frame, width=40)
-        self.log_path_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=5)
-        self.log_path_entry.insert(0, "/public_html/wp-content/debug.log") # Valor padrão
+        self.start_btn = ttk.Button(control_frame, text="Iniciar", command=self._start_monitoring)
+        self.start_btn.pack(side=tk.LEFT, padx=(20, 5))
 
-        # Botões de Controle
-        self.start_btn = ttk.Button(config_frame, text="Iniciar", command=self._start_monitoring)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
-
-        self.stop_btn = ttk.Button(config_frame, text="Parar", command=self._stop_monitoring, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(control_frame, text="Parar", command=self._stop_monitoring, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        # --- Frame de Caminho (Linha 3) ---
+        path_frame = ttk.Frame(config_frame, padding=(0, 10, 0, 0))
+        path_frame.pack(fill='x')
+
+        ttk.Label(path_frame, text="Caminho do Log:").pack(side=tk.LEFT, padx=(0, 5))
+        self.log_path_entry = ttk.Entry(path_frame)
+        self.log_path_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(0, 5))
+        self.log_path_entry.insert(0, "/public_html/wp-content/debug.log") 
+        self.log_path_entry.bind("<KeyRelease>", self._on_path_entry_change) # Evento para limpar seleção de favorito
+
+        self.browse_btn = ttk.Button(path_frame, text="Procurar...", command=self._open_ftp_browser, state=tk.DISABLED)
+        self.browse_btn.pack(side=tk.LEFT)
+
+        # --- Frame de Botões do Log (NOVO) ---
+        log_btn_frame = ttk.Frame(self.root, padding=(10, 5, 10, 5))
+        log_btn_frame.pack(fill='x')
+        
+        self.clear_log_btn = ttk.Button(log_btn_frame, text="Limpar Log", command=self._clear_log)
+        self.clear_log_btn.pack(side=tk.LEFT)
+        
+        self.copy_log_btn = ttk.Button(log_btn_frame, text="Copiar Log", command=self._copy_log)
+        self.copy_log_btn.pack(side=tk.LEFT, padx=10)
+        
+        self.export_log_btn = ttk.Button(log_btn_frame, text="Exportar Log...", command=self._export_log)
+        self.export_log_btn.pack(side=tk.LEFT)
 
         # --- Display de Log (Centro) ---
         self.log_display.pack(fill='both', expand=True, padx=10, pady=(0, 5))
-        self.log_display.configure(state=tk.DISABLED) # Apenas leitura
+        self.log_display.configure(state=tk.DISABLED) 
 
         # --- Barra de Status (Baixo) ---
         self.status_bar = ttk.Label(self.root, text="Pronto.", padding="5", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(fill='x', side=tk.BOTTOM)
 
+    # --- Funções de Carregamento e Eventos ---
+
     def _load_sites_to_combobox(self):
-        """Atualiza a lista de sites no Combobox."""
         sites = list(self.config_manager.get_sites().keys())
         self.site_combo['values'] = sites
         if sites:
             self.site_combo.current(0)
-            self._on_site_selected(None) # Carrega dados do primeiro site
+            self._on_site_selected(None) 
+        else:
+            self.browse_btn.config(state=tk.DISABLED)
+
+    def _load_favorites_to_combobox(self):
+        favorites = list(self.config_manager.get_favorites().keys())
+        self.fav_combo['values'] = favorites
+        if favorites:
+            self.fav_combo.set("") # Limpa a seleção
+        self.fav_del_btn.config(state=tk.DISABLED)
 
     def _on_site_selected(self, event):
-        """Chamado quando um site é selecionado no Combobox."""
-        # Em desenvolvimento futuro, poderíamos salvar o último log_path por site
-        pass
+        if self.site_combo.get():
+            self.browse_btn.config(state=tk.NORMAL)
+        else:
+            self.browse_btn.config(state=tk.DISABLED)
+        self._clear_favorite_selection() # Limpa favorito se o site for mudado manualmente
+
+    def _on_favorite_selected(self, event):
+        """Carrega o site e o caminho ao selecionar um favorito."""
+        fav_name = self.fav_combo.get()
+        if not fav_name:
+            self.fav_del_btn.config(state=tk.DISABLED)
+            return
+
+        favorites = self.config_manager.get_favorites()
+        fav_details = favorites.get(fav_name)
+        
+        if fav_details:
+            site_name = fav_details.get('site_name')
+            remote_path = fav_details.get('remote_path')
+            
+            # Verifica se o site ainda existe
+            if site_name not in self.config_manager.get_sites():
+                messagebox.showerror("Erro de Favorito", f"O site '{site_name}' associado a este favorito não existe mais.", parent=self.root)
+                self.fav_combo.set("")
+                return
+            
+            self.site_combo.set(site_name)
+            self.log_path_entry.delete(0, tk.END)
+            self.log_path_entry.insert(0, remote_path)
+            self.fav_del_btn.config(state=tk.NORMAL)
+            self._on_site_selected(None) # Habilita o botão "Procurar"
+        else:
+            self.fav_del_btn.config(state=tk.DISABLED)
+
+    def _on_path_entry_change(self, event):
+        """Limpa a seleção de favorito se o usuário digitar no caminho."""
+        self._clear_favorite_selection()
+        
+    def _clear_favorite_selection(self):
+        """Limpa a seleção do combobox de favoritos."""
+        if self.fav_combo.get():
+            self.fav_combo.set("")
+            self.fav_del_btn.config(state=tk.DISABLED)
+
+    # --- Funções de Controle do Log (NOVAS) ---
+
+    def _clear_log(self):
+        """Limpa o widget ScrolledText."""
+        self.log_display.configure(state=tk.NORMAL)
+        self.log_display.delete('1.0', tk.END)
+        self.log_display.configure(state=tk.DISABLED)
+        self.status_bar.config(text="Log limpo.")
+
+    def _copy_log(self):
+        """Copia todo o conteúdo do log para a área de transferência."""
+        try:
+            log_content = self.log_display.get('1.0', tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(log_content)
+            self.status_bar.config(text="Log copiado para a área de transferência.")
+        except Exception as e:
+            self.status_bar.config(text=f"Erro ao copiar: {e}")
+
+    def _export_log(self):
+        """Abre um diálogo 'Salvar Como' para exportar o log."""
+        try:
+            log_content = self.log_display.get('1.0', tk.END)
+            if not log_content.strip():
+                messagebox.showinfo("Log Vazio", "Não há nada para exportar.", parent=self.root)
+                return
+
+            file_path = filedialog.asksaveasfilename(
+                title="Exportar Log Como...",
+                defaultextension=".txt",
+                filetypes=[("Text Files", "*.txt"), ("Log Files", "*.log"), ("All Files", "*.*")]
+            )
+            
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(log_content)
+                self.status_bar.config(text=f"Log exportado para {file_path}")
+                
+        except Exception as e:
+            self.status_bar.config(text=f"Erro ao exportar: {e}")
+            messagebox.showerror("Erro ao Exportar", f"Não foi possível salvar o arquivo:\n{e}", parent=self.root)
+
+    # --- Funções de Gerenciamento (Favoritos, Sites, Poller) ---
+
+    def _save_favorite(self):
+        """Salva a combinação atual de site+caminho como um favorito."""
+        site_name = self.site_combo.get()
+        remote_path = self.log_path_entry.get().strip()
+        
+        if not site_name or not remote_path:
+            messagebox.showwarning("Dados Incompletos", "É preciso ter um Site selecionado e um Caminho de Log preenchido para salvar um favorito.", parent=self.root)
+            return
+
+        fav_name = simpledialog.askstring(
+            "Salvar Favorito", 
+            "Digite um nome para este favorito:",
+            parent=self.root
+        )
+        
+        if fav_name:
+            try:
+                fav_name = fav_name.strip()
+                self.config_manager.save_favorite(fav_name, site_name, remote_path)
+                self._load_favorites_to_combobox()
+                self.fav_combo.set(fav_name) # Seleciona o favorito recém-criado
+                self.fav_del_btn.config(state=tk.NORMAL)
+                self.status_bar.config(text=f"Favorito '{fav_name}' salvo.")
+            except Exception as e:
+                messagebox.showerror("Erro ao Salvar", f"Não foi possível salvar o favorito:\n{e}", parent=self.root)
+
+    def _delete_favorite(self):
+        """Exclui o favorito atualmente selecionado."""
+        fav_name = self.fav_combo.get()
+        if not fav_name:
+            return
+
+        if messagebox.askyesno("Confirmar Exclusão", f"Tem certeza que deseja excluir o favorito '{fav_name}'?", parent=self.root):
+            try:
+                self.config_manager.delete_favorite(fav_name)
+                self._load_favorites_to_combobox() # Recarrega a lista
+                self.status_bar.config(text=f"Favorito '{fav_name}' excluído.")
+            except Exception as e:
+                messagebox.showerror("Erro ao Excluir", f"Não foi possível excluir o favorito:\n{e}", parent=self.root)
+
+    def _open_ftp_browser(self):
+        site_name = self.site_combo.get()
+        if not site_name:
+            messagebox.showwarning("Aviso", "Por favor, selecione um site primeiro.", parent=self.root)
+            return
+
+        try:
+            site_config = self.config_manager.get_site_details(site_name)
+            if not site_config.get('ftp_password'):
+                messagebox.showerror("Erro de Configuração", f"Não foi possível carregar detalhes ou descriptografar senha para '{site_name}'.\nRe-salve a senha no Gerenciador de Sites.", parent=self.root)
+                return
+            
+            FTPBrowserWindow(self.root, site_config, self._on_file_selected_from_browser)
+        
+        except Exception as e:
+            messagebox.showerror("Erro ao Abrir Navegador", f"Ocorreu um erro: {e}", parent=self.root)
+            
+    def _on_file_selected_from_browser(self, selected_path: str):
+        if selected_path:
+            self.log_path_entry.delete(0, tk.END)
+            self.log_path_entry.insert(0, selected_path)
+            self._clear_favorite_selection() # Limpa favorito se o caminho foi mudado
+            print(f"Caminho do log selecionado: {selected_path}")
 
     def _open_site_manager(self):
-        """Abre a janela Toplevel para gerenciamento de sites."""
-        SiteManagerWindow(self.root, self.config_manager, self._load_sites_to_combobox)
+        # Passa o callback de sites E o de favoritos, para limpar favoritos de sites excluídos
+        SiteManagerWindow(self.root, self.config_manager, self._on_site_manager_close)
+
+    def _on_site_manager_close(self):
+        """Callback chamado ao fechar o gerenciador de sites."""
+        self._load_sites_to_combobox()
+        self._load_favorites_to_combobox() # Recarrega favoritos (caso algum site tenha sido excluído)
+        self._clear_favorite_selection()
+        # Limpa os campos se o site selecionado não existir mais
+        if self.site_combo.get() not in self.site_combo['values']:
+            self.site_combo.set("")
+            self.log_path_entry.delete(0, tk.END)
+            self._on_site_selected(None)
+
 
     def _start_monitoring(self):
-        """Inicia o monitoramento (inicia a thread)."""
         if self.poller_thread and self.poller_thread.is_alive():
             messagebox.showwarning("Aviso", "O monitoramento já está em execução.")
             return
@@ -121,64 +327,65 @@ class FTPLogTailerApp:
             return
 
         site_config = self.config_manager.get_site_details(site_name)
-        if not site_config.get('ftp_password'): # Falha na descriptografia ou config inválida
-             messagebox.showerror("Erro", f"Não foi possível carregar detalhes ou descriptografar senha para '{site_name}'.\nVerifique as configurações de criptografia ou re-salve a senha.")
+        if not site_config.get('ftp_password'):
+             messagebox.showerror("Erro", f"Não foi possível carregar detalhes ou descriptografar senha para '{site_name}'.\nVerifique o {KEY_FILE} ou re-salve a senha.")
              return
         
-        # Limpa a tela
-        self.log_display.configure(state=tk.NORMAL)
-        self.log_display.delete('1.0', tk.END)
-        self.log_display.configure(state=tk.DISABLED)
+        # Não limpa o log automaticamente, usa o botão "Limpar"
+        # self._clear_log() 
 
-        # Inicia a thread
         try:
             self.poller_thread = FTPLogPoller(site_config, remote_path, self.log_queue)
             self.poller_thread.start()
             
-            # Atualiza UI
-            self.start_btn.config(state=tk.DISABLED)
-            self.stop_btn.config(state=tk.NORMAL)
-            self.site_combo.config(state=tk.DISABLED)
-            self.log_path_entry.config(state=tk.DISABLED)
-            self.manage_sites_btn.config(state=tk.DISABLED)
+            self._set_ui_state(monitoring=True)
             self.status_bar.config(text=f"Iniciando monitoramento de '{remote_path}' em '{site_name}'...")
         
         except Exception as e:
             messagebox.showerror("Erro ao Iniciar", f"Não foi possível iniciar a thread de monitoramento: {e}")
 
     def _stop_monitoring(self):
-        """Para o monitoramento (para a thread)."""
         if self.poller_thread and self.poller_thread.is_alive():
             self.poller_thread.stop()
-            # O poller enviará uma msg de STATUS "Parado"
         
-        # Mesmo que a thread falhe em parar, resetamos a UI
-        self._reset_ui_to_stopped()
+        self._set_ui_state(monitoring=False) # Reseta a UI
 
-    def _reset_ui_to_stopped(self):
-        """Restaura o estado inicial da UI."""
-        self.start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.site_combo.config(state="readonly")
-        self.log_path_entry.config(state=tk.NORMAL)
-        self.manage_sites_btn.config(state=tk.NORMAL)
-        self.status_bar.config(text="Pronto.")
-        self.poller_thread = None
+    def _set_ui_state(self, monitoring: bool):
+        """Controla o estado (habilitado/desabilitado) dos widgets."""
+        state = tk.DISABLED if monitoring else tk.NORMAL
+        browse_state = tk.NORMAL if not monitoring and self.site_combo.get() else tk.DISABLED
+        
+        # Botões de controle
+        self.start_btn.config(state=tk.DISABLED if monitoring else tk.NORMAL)
+        self.stop_btn.config(state=tk.NORMAL if monitoring else tk.DISABLED)
+        
+        # Controles de Configuração
+        self.site_combo.config(state="disabled" if monitoring else "readonly")
+        self.log_path_entry.config(state=state)
+        self.manage_sites_btn.config(state=state)
+        self.browse_btn.config(state=browse_state)
+        
+        # Controles de Favoritos
+        self.fav_combo.config(state="disabled" if monitoring else "readonly")
+        self.fav_save_btn.config(state=state)
+        self.fav_del_btn.config(state=tk.DISABLED if monitoring else (tk.NORMAL if self.fav_combo.get() else tk.DISABLED))
+
+        if not monitoring:
+            self.status_bar.config(text="Pronto.")
+            self.poller_thread = None
 
     def _start_queue_checker(self):
-        """Inicia o loop .after() para verificar a fila (thread-safe)."""
         self.root.after(100, self._process_queue)
 
     def _process_queue(self):
-        """Processa mensagens da fila e atualiza a UI."""
         try:
-            while True: # Processa todas as mensagens pendentes
+            while True: 
                 msg_type, message = self.log_queue.get_nowait()
                 
                 if msg_type == MSG_TYPE_STATUS:
                     self.status_bar.config(text=message)
                     if "Monitoramento parado" in message:
-                        self._reset_ui_to_stopped()
+                        self._set_ui_state(monitoring=False)
                 
                 elif msg_type == MSG_TYPE_ERROR:
                     self._append_log(message, "ERROR")
@@ -188,46 +395,38 @@ class FTPLogTailerApp:
                     self._append_log(message, "LOG")
         
         except queue.Empty:
-            # Fila vazia, normal.
             pass
         except Exception as e:
             print(f"Erro ao processar a fila: {e}")
         
-        # Re-agenda a verificação
-        self.root.after(200, self._process_queue) # Intervalo de 200ms
+        self.root.after(200, self._process_queue) 
 
     def _append_log(self, text: str, tag: str):
-        """Adiciona texto ao ScrolledText de forma segura."""
         self.log_display.configure(state=tk.NORMAL)
         
-        # Adiciona highlight em linhas de erro
         if tag == "ERROR":
              self.log_display.insert(tk.END, text + '\n', (tag, "HIGHLIGHT"))
         else:
              self.log_display.insert(tk.END, text + '\n', (tag,))
         
-        self.log_display.see(tk.END) # Auto-scroll
+        self.log_display.see(tk.END) 
         self.log_display.configure(state=tk.DISABLED)
 
     def _on_closing(self):
-        """Chamado ao fechar a janela principal."""
         self._stop_monitoring()
         if self.poller_thread:
-            # Dá um tempo para a thread fechar
             self.poller_thread.join(timeout=1.0) 
         self.root.destroy()
 
 
+# (NENHUMA MUDANÇA DAQUI PARA BAIXO)
+# A classe SiteManagerWindow permanece idêntica
 class SiteManagerWindow(tk.Toplevel):
-    """
-    Janela Toplevel para CRUD (Criar, Ler, Atualizar, Excluir)
-    das configurações de Sites FTP.
-    """
     
     def __init__(self, parent, config_manager: ConfigManager, on_close_callback: callable):
         super().__init__(parent)
-        self.transient(parent) # Mantém no topo
-        self.grab_set() # Modal
+        self.transient(parent) 
+        self.grab_set() 
         
         self.title("Gerenciador de Sites FTP")
         self.geometry("600x450")
@@ -235,7 +434,7 @@ class SiteManagerWindow(tk.Toplevel):
         self.config_manager = config_manager
         self.on_close_callback = on_close_callback
         
-        self.current_site_name = None # Para saber se estamos editando
+        self.current_site_name = None 
 
         self._create_widgets()
         self._load_sites_to_listbox()
@@ -246,7 +445,6 @@ class SiteManagerWindow(tk.Toplevel):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill='both', expand=True)
         
-        # --- Lado Esquerdo (Lista de Sites) ---
         list_frame = ttk.Frame(main_frame)
         list_frame.pack(side=tk.LEFT, fill='y', padx=(0, 10))
 
@@ -255,37 +453,30 @@ class SiteManagerWindow(tk.Toplevel):
         self.sites_listbox.pack(fill='y', expand=True)
         self.sites_listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
 
-        # --- Lado Direito (Formulário) ---
         form_frame = ttk.Labelframe(main_frame, text="Detalhes do Site", padding="10")
         form_frame.pack(side=tk.LEFT, fill='both', expand=True)
 
-        # Nome (Chave)
         ttk.Label(form_frame, text="Nome do Site (Único):").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.name_entry = ttk.Entry(form_frame, width=40)
         self.name_entry.grid(row=0, column=1, sticky=tk.EW, pady=5, padx=5)
 
-        # Host
         ttk.Label(form_frame, text="FTP Host:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.host_entry = ttk.Entry(form_frame, width=40)
         self.host_entry.grid(row=1, column=1, sticky=tk.EW, pady=5, padx=5)
         
-        # Porta
         ttk.Label(form_frame, text="FTP Port:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.port_var = tk.IntVar(value=21)
         self.port_entry = ttk.Entry(form_frame, textvariable=self.port_var, width=10)
         self.port_entry.grid(row=2, column=1, sticky=tk.W, pady=5, padx=5)
         
-        # Usuário
         ttk.Label(form_frame, text="FTP User:").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.user_entry = ttk.Entry(form_frame, width=40)
         self.user_entry.grid(row=3, column=1, sticky=tk.EW, pady=5, padx=5)
         
-        # Senha
         ttk.Label(form_frame, text="FTP Password:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.pass_entry = ttk.Entry(form_frame, width=40, show="*")
         self.pass_entry.grid(row=4, column=1, sticky=tk.EW, pady=5, padx=5)
         
-        # Frame de Botões (Abaixo do formulário)
         button_frame = ttk.Frame(form_frame)
         button_frame.grid(row=5, column=0, columnspan=2, pady=20)
         
@@ -301,14 +492,12 @@ class SiteManagerWindow(tk.Toplevel):
         form_frame.columnconfigure(1, weight=1)
 
     def _load_sites_to_listbox(self):
-        """Carrega/recarrega os nomes dos sites na Listbox."""
         self.sites_listbox.delete(0, tk.END)
         sites = self.config_manager.get_sites()
         for site_name in sorted(sites.keys()):
             self.sites_listbox.insert(tk.END, site_name)
 
     def _on_listbox_select(self, event):
-        """Ao selecionar um site na lista, preenche o formulário."""
         try:
             selected_indices = self.sites_listbox.curselection()
             if not selected_indices:
@@ -325,18 +514,15 @@ class SiteManagerWindow(tk.Toplevel):
             self.host_entry.insert(0, site_details.get('ftp_host', ''))
             self.port_var.set(site_details.get('ftp_port', 21))
             self.user_entry.insert(0, site_details.get('ftp_user', ''))
-            
-            # A senha descriptografada
             self.pass_entry.insert(0, site_details.get('ftp_password', ''))
             
             self.delete_btn.config(state=tk.NORMAL)
-            self.name_entry.config(state=tk.DISABLED) # Não permite editar a chave (Nome)
+            self.name_entry.config(state=tk.DISABLED) 
 
         except Exception as e:
             messagebox.showerror("Erro ao Carregar", f"Não foi possível carregar os detalhes do site: {e}", parent=self)
 
     def _clear_form(self, clear_name=True):
-        """Limpa os campos do formulário para um novo cadastro."""
         if clear_name:
             self.name_entry.config(state=tk.NORMAL)
             self.name_entry.delete(0, tk.END)
@@ -349,13 +535,12 @@ class SiteManagerWindow(tk.Toplevel):
         self.sites_listbox.selection_clear(0, tk.END)
         self.delete_btn.config(state=tk.DISABLED)
         self.current_site_name = None
-        if not clear_name: # Se estamos limpando após seleção, mantemos o foco
+        if not clear_name: 
             self.host_entry.focus()
         else:
             self.name_entry.focus()
 
     def _save_site(self):
-        """Valida e salva os dados do formulário."""
         site_name = self.name_entry.get().strip()
         host = self.host_entry.get().strip()
         user = self.user_entry.get().strip()
@@ -373,10 +558,8 @@ class SiteManagerWindow(tk.Toplevel):
             return
 
         try:
-            # Se o nome estava desabilitado (edição), pegamos o nome original
             name_to_save = self.current_site_name if self.name_entry.cget('state') == tk.DISABLED else site_name
 
-            # Se estamos criando um novo e o nome já existe
             if self.current_site_name is None and name_to_save in self.config_manager.get_sites():
                  messagebox.showerror("Erro de Validação", f"O nome '{name_to_save}' já existe. Use outro nome.", parent=self)
                  return
@@ -393,7 +576,6 @@ class SiteManagerWindow(tk.Toplevel):
             messagebox.showerror("Erro ao Salvar", f"Ocorreu um erro: {e}", parent=self)
 
     def _delete_site(self):
-        """Exclui o site atualmente selecionado."""
         if not self.current_site_name:
             return
 
@@ -407,8 +589,7 @@ class SiteManagerWindow(tk.Toplevel):
                 messagebox.showerror("Erro ao Excluir", f"Ocorreu um erro: {e}", parent=self)
 
     def _on_close(self):
-        """Chamado ao fechar a janela de gerenciamento."""
-        self.on_close_callback() # Atualiza o Combobox da janela principal
+        self.on_close_callback()
         self.grab_release()
         self.destroy()
 
@@ -419,6 +600,5 @@ if __name__ == "__main__":
         app = FTPLogTailerApp(root)
         root.mainloop()
     except Exception as e:
-        # Fallback para erros de inicialização (ex: Tkinter não disponível)
         print(f"Erro fatal ao iniciar a aplicação: {e}")
         messagebox.showerror("Erro Fatal", f"Não foi possível iniciar a aplicação:\n{e}")

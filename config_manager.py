@@ -7,8 +7,8 @@ KEY_FILE = 'secret.key'
 
 class ConfigManager:
     """
-    Gerencia as configurações de conexão FTP, salvando-as em config.json
-    e criptografando/descriptografando senhas usando uma chave Fernet.
+    Gerencia as configurações de conexão FTP e Favoritos, salvando-as em config.json
+    e criptografando/descriptografando senhas de sites usando uma chave Fernet.
     """
 
     def __init__(self):
@@ -29,19 +29,23 @@ class ConfigManager:
             return key
 
     def _load_configs(self) -> dict:
-        """Carrega o arquivo config.json."""
+        """Carrega o arquivo config.json, garantindo que 'sites' e 'favorites' existam."""
         if not os.path.exists(CONFIG_FILE):
             print(f"Arquivo de configuração não encontrado. Criando {CONFIG_FILE}...")
-            self._save_configs({"sites": {}})
-            return {"sites": {}}
+            default_configs = {"sites": {}, "favorites": {}}
+            self._save_configs(default_configs)
+            return default_configs
         
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Garante que as chaves principais existam
+                data.setdefault('sites', {})
+                data.setdefault('favorites', {})
+                return data
         except json.JSONDecodeError:
             print(f"Erro ao ler {CONFIG_FILE}. O arquivo pode estar corrompido.")
-            # Em caso de falha, retorna um backup vazio para não travar a app
-            return {"sites": {}}
+            return {"sites": {}, "favorites": {}} # Retorna backup vazio
 
     def _save_configs(self, data: dict):
         """Salva o dicionário de configurações no arquivo config.json."""
@@ -50,6 +54,8 @@ class ConfigManager:
                 json.dump(data, f, indent=4)
         except IOError as e:
             print(f"Erro crítico ao salvar configurações em {CONFIG_FILE}: {e}")
+
+    # --- Métodos de Criptografia ---
 
     def encrypt_password(self, password: str) -> str:
         """Criptografa uma senha em texto plano."""
@@ -61,7 +67,9 @@ class ConfigManager:
             return self.fernet.decrypt(encrypted_password.encode('utf-8')).decode('utf-8')
         except Exception as e:
             print(f"Erro ao descriptografar senha (a chave pode ter mudado ou o dado está corrompido): {e}")
-            return "" # Retorna vazio em caso de falha
+            return ""
+
+    # --- Métodos de Sites ---
 
     def get_sites(self) -> dict:
         """Retorna o dicionário de sites configurados."""
@@ -75,13 +83,8 @@ class ConfigManager:
         if not site:
             return {}
         
-        # Cria uma cópia para não modificar o objeto em memória
         site_details = site.copy()
-        
-        # Descriptografa a senha para uso
         site_details['ftp_password'] = self.decrypt_password(site.get('ftp_password_encrypted', ''))
-        
-        # Garante valores padrão
         site_details.setdefault('ftp_host', '')
         site_details.setdefault('ftp_user', '')
         site_details.setdefault('ftp_port', 21)
@@ -113,5 +116,52 @@ class ConfigManager:
             del self.configs['sites'][site_name]
             self._save_configs(self.configs)
             print(f"Site '{site_name}' removido com sucesso.")
+
+            # (NOVO) Limpa favoritos associados a este site
+            favorites_to_delete = []
+            for fav_name, details in self.get_favorites().items():
+                if details.get('site_name') == site_name:
+                    favorites_to_delete.append(fav_name)
+            
+            if favorites_to_delete:
+                print(f"Limpando {len(favorites_to_delete)} favoritos associados ao site '{site_name}'...")
+                for fav_name in favorites_to_delete:
+                    self.delete_favorite(fav_name, save=False) # Não salva ainda
+                self._save_configs(self.configs) # Salva uma vez no final
+
         else:
             print(f"Site '{site_name}' não encontrado para remoção.")
+
+    # --- Métodos de Favoritos (NOVOS) ---
+
+    def get_favorites(self) -> dict:
+        """Retorna o dicionário de favoritos."""
+        return self.configs.get('favorites', {})
+
+    def save_favorite(self, favorite_name: str, site_name: str, remote_path: str):
+        """Salva ou atualiza um favorito."""
+        if not all([favorite_name, site_name, remote_path]):
+            raise ValueError("Nome do Favorito, Nome do Site e Caminho são obrigatórios.")
+        
+        if site_name not in self.get_sites():
+            raise ValueError(f"Site '{site_name}' não encontrado nas configurações.")
+
+        if 'favorites' not in self.configs:
+            self.configs['favorites'] = {}
+            
+        self.configs['favorites'][favorite_name] = {
+            'site_name': site_name,
+            'remote_path': remote_path
+        }
+        self._save_configs(self.configs)
+        print(f"Favorito '{favorite_name}' salvo com sucesso.")
+
+    def delete_favorite(self, favorite_name: str, save: bool = True):
+        """Remove um favorito da configuração."""
+        if 'favorites' in self.configs and favorite_name in self.configs['favorites']:
+            del self.configs['favorites'][favorite_name]
+            if save:
+                self._save_configs(self.configs)
+            print(f"Favorito '{favorite_name}' removido com sucesso.")
+        else:
+            print(f"Favorito '{favorite_name}' não encontrado para remoção.")
