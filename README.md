@@ -6,9 +6,9 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/yourusername/ftp_log_tailer)
 
-Uma aplicação desktop (Windows, macOS, Linux) construída com Python e Tkinter para monitorar arquivos de log em servidores FTP em tempo real, similar ao comando `tail -f`.
+Uma aplicação desktop (Windows, macOS, Linux) construída com Python e Tkinter para monitorar arquivos de log em servidores FTP e sincronizar pastas locais com servidores remotos.
 
-A aplicação utiliza threads para o monitoramento (polling) do FTP, garantindo que a interface do usuário não trave. A comunicação entre a thread de rede e a interface principal é feita de forma segura (thread-safe) usando o módulo `queue`.
+A aplicação utiliza threads para o monitoramento (polling) do FTP e sincronização de arquivos, garantindo que a interface do usuário não trave. A comunicação entre as threads de rede e a interface principal é feita de forma segura (thread-safe) usando o módulo `queue`.
 
 ## 📋 Sumário
 
@@ -24,12 +24,23 @@ A aplicação utiliza threads para o monitoramento (polling) do FTP, garantindo 
 
 ## 🚀 Funcionalidades
 
+### Interface com Abas
+A aplicação agora possui uma interface organizada em abas:
+
+#### 📄 Aba 1: FTP Log Tailer
 * **Gerenciador de Sites:** Salva múltiplas configurações de servidores FTP (Host, Usuário, Porta).
 * **Segurança:** As senhas de FTP são **criptografadas** no arquivo `config.json` usando a biblioteca `cryptography` (Fernet). Uma `secret.key` é gerada automaticamente no primeiro uso.
 * **Monitoramento "Tail":** Monitora um arquivo de log remoto (ex: `debug.log`) e exibe as novas linhas na tela à medida que são adicionadas.
 * **Detecção de Rotação:** Detecta automaticamente se o arquivo de log foi truncado ou substituído (rotação de log) e começa a ler do início do novo arquivo.
 * **Interface Responsiva:** A interface não trava (`(Not Responding)`) durante as conexões FTP, pois a lógica de rede roda em uma thread separada.
 * **Status em Tempo Real:** Uma barra de status informa o estado da conexão (Conectando, Buscando dados, Erros, etc.).
+
+#### 📁 Aba 2: Sincronização de Pastas
+* **Monitoramento Local:** Monitora pastas locais em tempo real usando `watchdog` para detectar criação, modificação e exclusão de arquivos.
+* **Sincronização Automática:** Envia automaticamente arquivos novos/modificados para um destino FTP configurado.
+* **Gerenciador de Tarefas:** Crie, edite e exclua tarefas de sincronização com configurações específicas (pasta local, pasta remota, site FTP).
+* **Log de Atividades:** Visualize em tempo real todas as operações de sincronização realizadas.
+* **Execução Independente:** Cada tarefa de sincronização é executada em sua própria thread de serviço.
 
 ## 🛠️ Instalação (Desenvolvimento)
 
@@ -56,6 +67,7 @@ A aplicação utiliza threads para o monitoramento (polling) do FTP, garantindo 
    ```bash
    pip install -r requirements.txt
    ```
+   *Novas dependências incluídas: `watchdog` para monitoramento de pastas locais*
 
 ## ▶️ Execução (Desenvolvimento)
 
@@ -67,80 +79,94 @@ python app_tk.py
 
 ## 📋 Como Usar
 
-### a. Primeiro Uso (Geração da Chave)
+### Configuração Inicial
 
-Na primeira vez que você executar a aplicação (`python app_tk.py`), dois arquivos serão criados na pasta raiz:
+Na primeira execução, dois arquivos serão criados na pasta raiz:
+* `secret.key`: Arquivo de criptografia de senhas. **NÃO O COMPARTILHE** e adicione-o ao `.gitignore`.
+* `config.json`: Armazena configurações de sites e tarefas de sincronização.
 
-* `secret.key`: (MUITO IMPORTANTE) Este arquivo criptografa suas senhas. **NÃO O COMPARTILHE** e adicione-o ao `.gitignore`. Se você perdê-lo, todas as senhas salvas em `config.json` se tornarão ilegíveis.
-* `config.json`: Armazena as configurações dos seus sites.
+### Aba 1: FTP Log Tailer
 
-### b. Configurar um Site
+1. **Configurar um Site:**
+   * Clique em "Gerenciar Sites..."
+   * Preencha os campos (Nome do Site, Host, Porta, Usuário, Senha)
+   * Clique em "Salvar"
 
-1. Com a aplicação aberta, clique no botão "Gerenciar Sites...".
-2. Na nova janela, preencha os campos (Nome do Site, Host, Porta, Usuário, Senha).
-3. Clique em "Salvar".
-4. Feche a janela de gerenciamento. O Combobox na tela principal será atualizado.
+2. **Iniciar Monitoramento:**
+   * Selecione o site no menu suspenso
+   * Insira o caminho completo do arquivo de log remoto
+   * Clique em "Iniciar"
 
-### c. Iniciar o Monitoramento
+### Aba 2: Sincronização de Pastas
 
-1. Selecione o site desejado no menu suspenso "Site".
-2. Insira o caminho completo do arquivo de log no campo "Caminho do Log" (ex: `/public_html/wp-content/debug.log`).
-3. Clique em "Iniciar".
-4. A tela de log começará a ser preenchida. Novas linhas aparecerão automaticamente.
+1. **Criar Tarefa de Sincronização:**
+   * Clique em "Gerenciar Tarefas..."
+   * Preencha os campos:
+     * Nome da Tarefa
+     * Pasta Local (para monitorar)
+     * Pasta Remota (destino no FTP)
+     * Site FTP (previamente configurado)
+   * Clique em "Salvar"
+
+2. **Iniciar Sincronização:**
+   * Selecione a tarefa na lista
+   * Clique em "Iniciar Sincronização"
+   * O monitoramento da pasta local começará automaticamente
+
+3. **Visualizar Atividades:**
+   * O log de sincronização mostrará todas as operações em tempo real
+   * Status de cada arquivo (enviado, falha, ignorado)
 
 ## 📦 Empacotamento (Deploy)
 
-Para distribuir esta aplicação como um executável único (.exe no Windows ou um app no macOS) que não exige que o usuário tenha o Python instalado, você pode usar o PyInstaller.
+Para distribuir como executável único:
 
-### Pré-requisitos
+1. **Instale o PyInstaller:**
+   ```bash
+   pip install pyinstaller
+   ```
 
-Certifique-se de que o PyInstaller está instalado no seu ambiente virtual:
+2. **Execute o comando de empacotamento:**
+   ```bash
+   pyinstaller --onefile --noconsole --name="FTPLogTailer" app_tk.py
+   ```
 
-```bash
-pip install pyinstaller
-```
-
-### Comando de Empacotamento
-
-Execute o comando a seguir para criar o executável (substitua `app_tk.py` se necessário):
-
-```bash
-# Comando para criar um executável único (one-file) e sem janela de console
-pyinstaller --onefile --noconsole --name="FTPLogTailer" app_tk.py
-```
-
-* `--onefile`: Agrupa tudo em um único arquivo.
-* `--noconsole` (ou `-w`): Impede que o terminal/console apareça ao executar a aplicação (essencial para apps de UI).
-* `--name`: Define o nome do executável final.
-
-O executável final estará na pasta `dist/`. Você pode distribuir o arquivo `FTPLogTailer` (ou `FTPLogTailer.exe`) para seus usuários.
+3. **Distribua o executável:**
+   * Windows: `dist/FTPLogTailer.exe`
+   * macOS: `dist/FTPLogTailer`
+   * Linux: `dist/FTPLogTailer`
 
 ### Notas de Empacotamento
-
-* No Windows, o executável pode ser detectado por alguns antivírus como falso positivo. Isso é comum com aplicações empacotadas com PyInstaller.
-* Para macOS, você pode precisar assinar o aplicativo para evitar problemas de segurança do Gatekeeper.
-* Para Linux, geralmente não são necessários passos adicionais.
+* No Windows, o executável pode ser detectado como falso positivo por antivírus
+* Para macOS, pode ser necessário assinar o aplicativo para evitar problemas com o Gatekeeper
+* Inclua os arquivos `config.json` e `secret.key` na distribuição se necessário
 
 ## 🔧 Solução de Problemas
 
 ### Problemas Comuns
 
 * **Não consigo conectar ao servidor FTP:**
-  * Verifique se as credenciais estão corretas
-  * Confirme se o servidor FTP permite conexões externas
-  * Verifique se há firewalls bloqueando a conexão
+  * Verifique credenciais e configurações de rede
+  * Confirme se o servidor permite conexões externas
+  * Verifique firewalls
 
-* **A aplicação trava ao iniciar:**
-  * Certifique-se de que o arquivo `secret.key` existe no mesmo diretório da aplicação
-  * Verifique se as permissões de arquivo estão corretas
+* **A sincronização não funciona:**
+  * Verifique permissões na pasta local
+  * Confirme se a pasta remota existe no servidor FTP
+  * Verifique se há espaço suficiente no servidor
 
 * **Perdi meu arquivo `secret.key`:**
-  * Infelizmente, você precisará excluir o arquivo `config.json` e reconfigurar todos os seus sites
-  * Uma nova chave será gerada automaticamente na próxima execução
+  * Exclua `config.json` e reconfigure tudo
+  * Uma nova chave será gerada automaticamente
+
+* **Arquivos não são sincronizados:**
+  * Verifique se a tarefa está ativa
+  * Confirme se o monitoramento local está funcionando
+  * Verifique o log de sincronização para erros
 
 ## 🤝 Contribuição
 
-Contribuições são bem-vindas! Sinta-se à vontade para abrir uma issue para reportar bugs ou sugerir melhorias. Pull requests também são encorajados.
+Contribuições são bem-vindas! Sinta-se à vontade para abrir issues ou pull requests.
 
 1. Faça um fork do projeto
 2. Crie sua branch de feature (`git checkout -b feature/nova-funcionalidade`)
