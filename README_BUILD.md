@@ -10,6 +10,10 @@ Antes de executar o script, garanta que você tenha:
 2.  **Inno Setup:** O [Inno Setup (versão 6 ou superior)](https://jrsoftware.org/isinfo.php) deve estar instalado. O script `build.bat` tentará encontrá-lo automaticamente nos caminhos padrão (`C:\Program Files (x86)\Inno Setup 6` ou `C:\Program Files\Inno Setup 6`).
 3.  **Arquivos do Projeto:** Todos os arquivos do projeto (`app_tk.py`, `requirements.txt`, `icon.ico`, `instalador.iss`, `FTP_Utilities.spec`, etc.) devem estar na mesma pasta.
 
+## Compilação manual 
+1. Execute no terminal pyinstaller --onefile --noconsole --icon=icon.ico --name="FTP_Utilities"  app_tk.py
+2. abra o inno setup e execute o arquivo instalador.iss
+
 ## Processo de Compilação Automatizado
 
 O script `build.bat` automatiza todo o processo. Para executar:

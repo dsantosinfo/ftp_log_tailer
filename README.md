@@ -1,12 +1,12 @@
 
 
-# FTP Log Tailer (Desktop)
+# FTP/SSH Log Tailer (Desktop)
 
 [![Python](https://img.shields.io/badge/Python-3.7%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/yourusername/ftp_log_tailer)
 
-Uma aplicação desktop (Windows, macOS, Linux) construída com Python e Tkinter para monitorar arquivos de log em servidores FTP e sincronizar pastas locais com servidores remotos.
+Uma aplicação desktop (Windows, macOS, Linux) construída com Python e Tkinter para monitorar arquivos de log em servidores FTP/SSH e sincronizar pastas locais com servidores remotos.
 
 A aplicação utiliza threads para o monitoramento (polling) do FTP e sincronização de arquivos, garantindo que a interface do usuário não trave. A comunicação entre as threads de rede e a interface principal é feita de forma segura (thread-safe) usando o módulo `queue`.
 
@@ -27,18 +27,19 @@ A aplicação utiliza threads para o monitoramento (polling) do FTP e sincroniza
 ### Interface com Abas
 A aplicação agora possui uma interface organizada em abas:
 
-#### 📄 Aba 1: FTP Log Tailer
-* **Gerenciador de Sites:** Salva múltiplas configurações de servidores FTP (Host, Usuário, Porta).
-* **Segurança:** As senhas de FTP são **criptografadas** no arquivo `config.json` usando a biblioteca `cryptography` (Fernet). Uma `secret.key` é gerada automaticamente no primeiro uso.
+#### 📄 Aba 1: FTP/SSH Log Tailer
+* **Gerenciador de Sites:** Salva múltiplas configurações de servidores FTP e SSH (Host, Usuário, Porta, Tipo de Conexão).
+* **Suporte FTP e SSH:** Conecta tanto em servidores FTP tradicionais quanto em servidores SSH/SFTP para maior flexibilidade e segurança.
+* **Segurança:** As senhas são **criptografadas** no arquivo `config.json` usando a biblioteca `cryptography` (Fernet). Uma `secret.key` é gerada automaticamente no primeiro uso.
 * **Monitoramento "Tail":** Monitora um arquivo de log remoto (ex: `debug.log`) e exibe as novas linhas na tela à medida que são adicionadas.
 * **Detecção de Rotação:** Detecta automaticamente se o arquivo de log foi truncado ou substituído (rotação de log) e começa a ler do início do novo arquivo.
-* **Interface Responsiva:** A interface não trava (`(Not Responding)`) durante as conexões FTP, pois a lógica de rede roda em uma thread separada.
+* **Interface Responsiva:** A interface não trava (`(Not Responding)`) durante as conexões, pois a lógica de rede roda em uma thread separada.
 * **Status em Tempo Real:** Uma barra de status informa o estado da conexão (Conectando, Buscando dados, Erros, etc.).
 
 #### 📁 Aba 2: Sincronização de Pastas
 * **Monitoramento Local:** Monitora pastas locais em tempo real usando `watchdog` para detectar criação, modificação e exclusão de arquivos.
-* **Sincronização Automática:** Envia automaticamente arquivos novos/modificados para um destino FTP configurado.
-* **Gerenciador de Tarefas:** Crie, edite e exclua tarefas de sincronização com configurações específicas (pasta local, pasta remota, site FTP).
+* **Sincronização Automática:** Envia automaticamente arquivos novos/modificados para destinos FTP ou SSH configurados.
+* **Gerenciador de Tarefas:** Crie, edite e exclua tarefas de sincronização com configurações específicas (pasta local, pasta remota, site FTP/SSH).
 * **Log de Atividades:** Visualize em tempo real todas as operações de sincronização realizadas.
 * **Execução Independente:** Cada tarefa de sincronização é executada em sua própria thread de serviço.
 
@@ -67,7 +68,7 @@ A aplicação agora possui uma interface organizada em abas:
    ```bash
    pip install -r requirements.txt
    ```
-   *Novas dependências incluídas: `watchdog` para monitoramento de pastas locais*
+   *Dependências incluídas: `watchdog` para monitoramento de pastas locais, `paramiko` para conexões SSH*
 
 ## ▶️ Execução (Desenvolvimento)
 
@@ -85,10 +86,11 @@ Na primeira execução, dois arquivos serão criados na pasta raiz:
 * `secret.key`: Arquivo de criptografia de senhas. **NÃO O COMPARTILHE** e adicione-o ao `.gitignore`.
 * `config.json`: Armazena configurações de sites e tarefas de sincronização.
 
-### Aba 1: FTP Log Tailer
+### Aba 1: FTP/SSH Log Tailer
 
 1. **Configurar um Site:**
    * Clique em "Gerenciar Sites..."
+   * Selecione o tipo de conexão (FTP ou SSH)
    * Preencha os campos (Nome do Site, Host, Porta, Usuário, Senha)
    * Clique em "Salvar"
 
@@ -104,8 +106,8 @@ Na primeira execução, dois arquivos serão criados na pasta raiz:
    * Preencha os campos:
      * Nome da Tarefa
      * Pasta Local (para monitorar)
-     * Pasta Remota (destino no FTP)
-     * Site FTP (previamente configurado)
+     * Pasta Remota (destino no servidor)
+     * Site FTP/SSH (previamente configurado)
    * Clique em "Salvar"
 
 2. **Iniciar Sincronização:**
@@ -145,15 +147,17 @@ Para distribuir como executável único:
 
 ### Problemas Comuns
 
-* **Não consigo conectar ao servidor FTP:**
+* **Não consigo conectar ao servidor FTP/SSH:**
   * Verifique credenciais e configurações de rede
   * Confirme se o servidor permite conexões externas
   * Verifique firewalls
+  * Para SSH: Certifique-se de que o servidor SSH está rodando na porta correta
 
 * **A sincronização não funciona:**
   * Verifique permissões na pasta local
-  * Confirme se a pasta remota existe no servidor FTP
+  * Confirme se a pasta remota existe no servidor
   * Verifique se há espaço suficiente no servidor
+  * Para SSH: Verifique permissões de escrita no diretório remoto
 
 * **Perdi meu arquivo `secret.key`:**
   * Exclua `config.json` e reconfigure tudo

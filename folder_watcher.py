@@ -3,6 +3,7 @@ import time
 import threading
 from queue import Queue
 from ftplib import FTP, error_perm
+import paramiko
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -11,10 +12,9 @@ SYNC_MSG_STATUS = "STATUS"
 SYNC_MSG_SUCCESS = "SUCCESS"
 SYNC_MSG_ERROR = "ERROR"
 
-class FTPUploadHandler(FileSystemEventHandler):
+class BaseUploadHandler(FileSystemEventHandler):
     """
-    Manipulador de eventos do Watchdog que faz o upload de arquivos via FTP
-    quando são criados ou modificados.
+    Classe base para manipuladores de upload (FTP/SSH).
     """
     
     def __init__(self, job_name: str, config: dict, output_queue: Queue):
@@ -25,10 +25,11 @@ class FTPUploadHandler(FileSystemEventHandler):
         self.local_path = config['local_path']
         self.remote_path = config['remote_path']
         
-        self.ftp_host = config['ftp_host']
-        self.ftp_port = config['ftp_port']
-        self.ftp_user = config['ftp_user']
-        self.ftp_password = config['ftp_password'] # Senha já descriptografada
+        self.host = config.get('host', config.get('ftp_host', ''))
+        self.port = config.get('port', config.get('ftp_port', 21))
+        self.user = config.get('user', config.get('ftp_user', ''))
+        self.password = config.get('password', config.get('ftp_password', ''))
+        self.connection_type = config.get('connection_type', 'ftp')
 
     def _log(self, msg_type: str, message: str):
         """Envia uma mensagem formatada para a fila da UI."""
@@ -38,14 +39,33 @@ class FTPUploadHandler(FileSystemEventHandler):
         except Exception as e:
             print(f"Erro na fila de Sync: {e}")
 
+    def _upload_file(self, local_event_path: str):
+        """Método abstrato para upload - deve ser implementado pelas subclasses."""
+        raise NotImplementedError
+
+    def on_created(self, event):
+        if not event.is_directory:
+            threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
+
+
+class FTPUploadHandler(BaseUploadHandler):
+    """
+    Manipulador de eventos do Watchdog que faz o upload de arquivos via FTP
+    quando são criados ou modificados.
+    """
+
     def _connect_ftp(self) -> FTP | None:
         """Tenta conectar e logar no servidor FTP."""
         try:
             ftp = FTP()
-            ftp.connect(self.ftp_host, self.ftp_port, timeout=10)
-            ftp.login(self.ftp_user, self.ftp_password)
+            ftp.connect(self.host, self.port, timeout=10)
+            ftp.login(self.user, self.password)
             ftp.set_pasv(True)
-            self._log(SYNC_MSG_STATUS, f"Conectado a {self.ftp_host} para upload...")
+            self._log(SYNC_MSG_STATUS, f"Conectado a {self.host} para upload...")
             return ftp
         except Exception as e:
             self._log(SYNC_MSG_ERROR, f"Erro ao conectar/logar no FTP: {e}")
@@ -130,17 +150,109 @@ class FTPUploadHandler(FileSystemEventHandler):
                 except Exception:
                     pass # Ignora
 
-    def on_created(self, event):
-        if not event.is_directory:
-            # Inicia o upload em uma nova thread para não bloquear o watchdog
-            threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
-
-    def on_modified(self, event):
-        if not event.is_directory:
-            threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
-
     # on_deleted: Pode ser implementado para excluir arquivos remotos, se desejado.
     # on_moved: Pode ser implementado para renomear/mover remotamente.
+
+
+class SSHUploadHandler(BaseUploadHandler):
+    """
+    Manipulador de eventos do Watchdog que faz o upload de arquivos via SSH/SFTP
+    quando são criados ou modificados.
+    """
+
+    def _connect_ssh(self):
+        """Tenta conectar ao servidor SSH e abrir SFTP."""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=self.host,
+                port=self.port,
+                username=self.user,
+                password=self.password,
+                timeout=10
+            )
+            sftp = ssh.open_sftp()
+            self._log(SYNC_MSG_STATUS, f"Conectado via SSH a {self.host} para upload...")
+            return ssh, sftp
+        except Exception as e:
+            self._log(SYNC_MSG_ERROR, f"Erro ao conectar via SSH: {e}")
+            return None, None
+
+    def _create_remote_dirs_ssh(self, sftp, remote_full_dir: str):
+        """Cria recursivamente diretórios no servidor SSH."""
+        if not remote_full_dir or remote_full_dir == '/':
+            return
+        
+        parts = remote_full_dir.split('/')
+        current_dir = ""
+        for part in parts:
+            if not part: continue
+            
+            if not current_dir and remote_full_dir.startswith('/'):
+                current_dir = f"/{part}"
+            else:
+                current_dir = f"{current_dir}/{part}" if current_dir else part
+                
+            try:
+                sftp.stat(current_dir)  # Tenta verificar se existe
+            except FileNotFoundError:
+                try:
+                    sftp.mkdir(current_dir)  # Se não existe, cria
+                    self._log(SYNC_MSG_STATUS, f"Diretório remoto '{current_dir}' criado via SSH.")
+                except Exception as e_mkdir:
+                    self._log(SYNC_MSG_ERROR, f"Falha ao criar diretório '{current_dir}' via SSH: {e_mkdir}")
+                    raise
+
+    def _upload_file(self, local_event_path: str):
+        """Thread de trabalho para fazer o upload de um único arquivo via SSH."""
+        if not os.path.isfile(local_event_path):
+            self._log(SYNC_MSG_STATUS, f"Ignorando (não é arquivo): {local_event_path}")
+            return
+
+        file_name = os.path.basename(local_event_path)
+        
+        try:
+            relative_path = os.path.relpath(local_event_path, self.local_path)
+        except ValueError:
+            self._log(SYNC_MSG_ERROR, f"Erro: '{local_event_path}' não está dentro de '{self.local_path}'.")
+            return
+
+        remote_full_path = os.path.join(self.remote_path, relative_path).replace("\\", "/")
+        remote_dir = os.path.dirname(remote_full_path)
+
+        self._log(SYNC_MSG_STATUS, f"Iniciando upload SSH de '{file_name}' para '{remote_full_path}'...")
+        
+        ssh = None
+        sftp = None
+        try:
+            ssh, sftp = self._connect_ssh()
+            if not ssh or not sftp:
+                return
+
+            # 1. Garantir que a estrutura de pastas exista
+            self._create_remote_dirs_ssh(sftp, remote_dir)
+            
+            # 2. Fazer o upload
+            sftp.put(local_event_path, remote_full_path)
+            
+            self._log(SYNC_MSG_SUCCESS, f"Upload SSH de '{file_name}' concluído com sucesso.")
+            
+        except FileNotFoundError:
+             self._log(SYNC_MSG_ERROR, f"Arquivo local não encontrado (pode ter sido excluído rapidamente): {local_event_path}")
+        except Exception as e:
+             self._log(SYNC_MSG_ERROR, f"Erro inesperado no upload SSH de '{file_name}': {e}")
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
 
 
 class SyncService(threading.Thread):
@@ -179,11 +291,16 @@ class SyncService(threading.Thread):
                 continue
 
             try:
-                # Cria um handler para este job específico
-                event_handler = FTPUploadHandler(job_name, config, self.output_queue)
+                # Cria o handler apropriado baseado no tipo de conexão
+                connection_type = config.get('connection_type', 'ftp')
+                if connection_type == 'ssh':
+                    event_handler = SSHUploadHandler(job_name, config, self.output_queue)
+                else:
+                    event_handler = FTPUploadHandler(job_name, config, self.output_queue)
+                
                 # Agenda o monitoramento (recursive=True monitora subpastas)
                 self.observer.schedule(event_handler, local_path, recursive=True)
-                self._log(SYNC_MSG_SUCCESS, f"[{job_name}] Monitoramento iniciado para: '{local_path}'")
+                self._log(SYNC_MSG_SUCCESS, f"[{job_name}] Monitoramento {connection_type.upper()} iniciado para: '{local_path}'")
                 jobs_iniciados += 1
             except Exception as e:
                  self._log(SYNC_MSG_ERROR, f"[{job_name}] Erro ao agendar monitoramento: {e}")

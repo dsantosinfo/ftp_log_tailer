@@ -113,22 +113,38 @@ class ConfigManager:
             return {}
         
         site_details = site.copy()
-        site_details['ftp_password'] = self.decrypt_password(site.get('ftp_password_encrypted', ''))
-        site_details.setdefault('ftp_host', '')
-        site_details.setdefault('ftp_user', '')
-        site_details.setdefault('ftp_port', 21)
+        # Decrypt password
+        site_details['password'] = self.decrypt_password(site.get('password_encrypted', ''))
+        
+        # Set defaults based on connection type
+        connection_type = site.get('connection_type', 'ftp')
+        site_details.setdefault('host', '')
+        site_details.setdefault('user', '')
+        site_details.setdefault('connection_type', connection_type)
+        
+        if connection_type == 'ftp':
+            site_details.setdefault('port', 21)
+        elif connection_type == 'ssh':
+            site_details.setdefault('port', 22)
+        
+        # Backward compatibility
+        site_details['ftp_host'] = site_details['host']
+        site_details['ftp_user'] = site_details['user']
+        site_details['ftp_password'] = site_details['password']
+        site_details['ftp_port'] = site_details['port']
         
         return site_details
 
-    def save_site(self, site_name: str, host: str, user: str, password_plain: str, port: int):
+    def save_site(self, site_name: str, host: str, user: str, password_plain: str, port: int, connection_type: str = 'ftp'):
         if not site_name or not host or not user:
             raise ValueError("Nome do Site, Host e Usuário são obrigatórios.")
 
         self.configs['sites'][site_name] = {
-            'ftp_host': host,
-            'ftp_user': user,
-            'ftp_password_encrypted': self.encrypt_password(password_plain),
-            'ftp_port': port
+            'host': host,
+            'user': user,
+            'password_encrypted': self.encrypt_password(password_plain),
+            'port': port,
+            'connection_type': connection_type
         }
         self._save_configs(self.configs)
 

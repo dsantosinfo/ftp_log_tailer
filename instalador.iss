@@ -1,7 +1,7 @@
 ; --- DEFINIÇÕES GLOBAIS ---
 ; Este nome deve bater com o nome definido no .spec
 #define MyAppName "FTP Utilities (Tailer & Sync)"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.1"
 #define MyAppPublisher "DSantos Info"
 ; *** ESTE NOME DEVE BATER COM O --name DO PYINSTALLER ***
 ; (O arquivo FTP_Utilities.spec usa este nome)
