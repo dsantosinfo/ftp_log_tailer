@@ -4,13 +4,14 @@ import queue
 import threading
 import os
 import sys # (NOVO) Importado para o resource_path
+from ftplib import FTP
 
 from config_manager import ConfigManager
 from ftp_poller import FTPLogPoller, MSG_TYPE_LOG, MSG_TYPE_STATUS, MSG_TYPE_ERROR
 from ssh_poller import SSHLogPoller
 from ftp_browser import FTPBrowserWindow
 from ssh_browser import SSHBrowserWindow
-from folder_watcher import SyncService, SYNC_MSG_STATUS, SYNC_MSG_SUCCESS, SYNC_MSG_ERROR
+from folder_watcher import SyncService, SYNC_MSG_STATUS, SYNC_MSG_SUCCESS, SYNC_MSG_ERROR, should_ignore_path
 
 # (NOVO) FUNÇÃO PARA GARANTIR QUE O ÍCONE SEJA ENCONTRADO (DEV E EXE)
 def resource_path(relative_path):
@@ -173,6 +174,8 @@ class FTPLogTailerApp:
         self.sync_add_btn.pack(side=tk.LEFT)
         self.sync_del_btn = ttk.Button(jobs_btn_frame, text="Remover", command=self._remove_sync_job, state=tk.DISABLED)
         self.sync_del_btn.pack(side=tk.LEFT, padx=5)
+        self.upload_all_btn = ttk.Button(jobs_btn_frame, text="Carregar Todos", command=self._upload_all_files, state=tk.DISABLED)
+        self.upload_all_btn.pack(side=tk.LEFT, padx=5)
 
         log_frame = ttk.Labelframe(sync_main_frame, text="Log de Sincronização", padding="5")
         log_frame.pack(fill='both', expand=True)
@@ -446,8 +449,10 @@ class FTPLogTailerApp:
     def _on_sync_job_select(self, event):
         if self.sync_jobs_tree.focus():
             self.sync_del_btn.config(state=tk.NORMAL)
+            self.upload_all_btn.config(state=tk.NORMAL)
         else:
             self.sync_del_btn.config(state=tk.DISABLED)
+            self.upload_all_btn.config(state=tk.DISABLED)
 
     def _add_sync_job(self):
         sites = list(self.config_manager.get_sites().keys())
@@ -506,7 +511,270 @@ class FTPLogTailerApp:
         self.sync_stop_btn.config(text="Parar Sincronização")  
         self.sync_add_btn.config(state=state)
         self.sync_del_btn.config(state=tk.DISABLED if monitoring else (tk.NORMAL if self.sync_jobs_tree.focus() else tk.DISABLED))
+        self.upload_all_btn.config(state=tk.DISABLED if monitoring else (tk.NORMAL if self.sync_jobs_tree.focus() else tk.DISABLED))
         if not monitoring: self.sync_service_thread = None
+
+    def _upload_all_files(self):
+        """Faz upload de todos os arquivos da pasta local selecionada para o servidor remoto."""
+        selected_iid = self.sync_jobs_tree.focus()
+        if not selected_iid:
+            return
+        
+        # Confirmação do usuário
+        if not messagebox.askyesno(
+            "Confirmar Upload", 
+            f"Deseja fazer upload de TODOS os arquivos da tarefa '{selected_iid}' para o servidor?\n\nEsta operação pode demorar dependendo da quantidade de arquivos.",
+            parent=self.root
+        ):
+            return
+        
+        # Obtém configurações da tarefa
+        all_jobs = self.config_manager.get_sync_jobs()
+        job_details = all_jobs.get(selected_iid)
+        if not job_details:
+            messagebox.showerror("Erro", f"Tarefa '{selected_iid}' não encontrada.", parent=self.root)
+            return
+        
+        site_name = job_details.get('site_name')
+        site_config = self.config_manager.get_site_details(site_name)
+        if not site_config.get('password'):
+            messagebox.showerror("Erro", f"Não foi possível carregar senha do site '{site_name}'.", parent=self.root)
+            return
+        
+        local_path = job_details.get('local_path')
+        remote_path = job_details.get('remote_path')
+        
+        if not os.path.isdir(local_path):
+            messagebox.showerror("Erro", f"Pasta local '{local_path}' não existe.", parent=self.root)
+            return
+        
+        # Inicia o upload em uma thread separada
+        upload_config = {
+            **site_config,
+            'local_path': local_path,
+            'remote_path': remote_path,
+            'job_name': selected_iid
+        }
+        
+        upload_thread = threading.Thread(
+            target=self._bulk_upload_worker,
+            args=(upload_config,),
+            daemon=True
+        )
+        upload_thread.start()
+        
+        # Desabilita o botão temporariamente
+        self.upload_all_btn.config(state=tk.DISABLED, text="Carregando...")
+        
+        # Reabilita o botão após 3 segundos (tempo para iniciar o processo)
+        self.root.after(3000, lambda: self.upload_all_btn.config(state=tk.NORMAL, text="Carregar Todos"))
+    
+    def _bulk_upload_worker(self, config: dict):
+        """Worker thread para fazer upload de todos os arquivos."""
+        job_name = config['job_name']
+        local_path = config['local_path']
+        connection_type = config.get('connection_type', 'ftp')
+        
+        try:
+            self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Iniciando upload de todos os arquivos..."))
+            
+            # Conta total de arquivos (excluindo os ignorados)
+            total_files = 0
+            for root, dirs, files in os.walk(local_path):
+                # Filtra diretórios ignorados
+                dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(root, d))]
+                # Conta apenas arquivos não ignorados
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if not should_ignore_path(file_path):
+                        total_files += 1
+            
+            if total_files == 0:
+                self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Nenhum arquivo encontrado para upload."))
+                return
+            
+            self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Encontrados {total_files} arquivos para upload."))
+            
+            uploaded_count = 0
+            failed_count = 0
+            
+            # Percorre todos os arquivos
+            for root, dirs, files in os.walk(local_path):
+                # Filtra diretórios ignorados para não entrar neles
+                dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(root, d))]
+                
+                for file in files:
+                    local_file_path = os.path.join(root, file)
+                    
+                    # Pula arquivos ignorados
+                    if should_ignore_path(local_file_path):
+                        continue
+                    
+                    relative_path = os.path.relpath(local_file_path, local_path)
+                    
+                    # Faz upload do arquivo
+                    if self._upload_single_file(config, local_file_path, relative_path):
+                        uploaded_count += 1
+                    else:
+                        failed_count += 1
+            
+            # Relatório final
+            self.folder_sync_queue.put_nowait((
+                SYNC_MSG_SUCCESS, 
+                f"[{job_name}] Upload concluído! {uploaded_count} arquivos enviados, {failed_count} falharam."
+            ))
+            
+        except Exception as e:
+            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro no upload em lote: {e}"))
+    
+    def _upload_single_file(self, config: dict, local_file_path: str, relative_path: str) -> bool:
+        """Faz upload de um único arquivo. Retorna True se bem-sucedido."""
+        connection_type = config.get('connection_type', 'ftp')
+        job_name = config['job_name']
+        
+        try:
+            if connection_type == 'ssh':
+                return self._upload_file_ssh(config, local_file_path, relative_path)
+            else:
+                return self._upload_file_ftp(config, local_file_path, relative_path)
+        except Exception as e:
+            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro ao enviar {relative_path}: {e}"))
+            return False
+    
+    def _upload_file_ftp(self, config: dict, local_file_path: str, relative_path: str) -> bool:
+        """Upload via FTP."""
+        job_name = config['job_name']
+        remote_path = config['remote_path']
+        
+        ftp = None
+        try:
+            # Conecta
+            ftp = FTP()
+            ftp.connect(config['host'], config['port'], timeout=10)
+            ftp.login(config['user'], config['password'])
+            ftp.set_pasv(True)
+            
+            # Constrói caminho remoto
+            remote_file_path = os.path.join(remote_path, relative_path).replace("\\", "/")
+            remote_dir = os.path.dirname(remote_file_path)
+            
+            # Cria diretórios se necessário
+            self._create_ftp_dirs(ftp, remote_dir)
+            
+            # Upload
+            with open(local_file_path, 'rb') as fp:
+                ftp.storbinary(f'STOR {remote_file_path}', fp)
+            
+            file_size = os.path.getsize(local_file_path)
+            self.folder_sync_queue.put_nowait((SYNC_MSG_SUCCESS, f"[{job_name}] Enviado via FTP: {relative_path} ({file_size} bytes)"))
+            return True
+            
+        except Exception as e:
+            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro FTP ao enviar {relative_path}: {e}"))
+            return False
+        finally:
+            if ftp:
+                try:
+                    ftp.quit()
+                except Exception:
+                    pass
+    
+    def _upload_file_ssh(self, config: dict, local_file_path: str, relative_path: str) -> bool:
+        """Upload via SSH/SFTP."""
+        job_name = config['job_name']
+        remote_path = config['remote_path']
+        
+        ssh = None
+        sftp = None
+        try:
+            # Conecta
+            import paramiko
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=config['host'],
+                port=config['port'],
+                username=config['user'],
+                password=config['password'],
+                timeout=10
+            )
+            sftp = ssh.open_sftp()
+            
+            # Constrói caminho remoto
+            remote_file_path = os.path.join(remote_path, relative_path).replace("\\", "/")
+            remote_dir = os.path.dirname(remote_file_path)
+            
+            # Cria diretórios se necessário
+            self._create_ssh_dirs(sftp, remote_dir)
+            
+            # Upload
+            sftp.put(local_file_path, remote_file_path)
+            
+            file_size = os.path.getsize(local_file_path)
+            self.folder_sync_queue.put_nowait((SYNC_MSG_SUCCESS, f"[{job_name}] Enviado via SSH: {relative_path} ({file_size} bytes)"))
+            return True
+            
+        except Exception as e:
+            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro SSH ao enviar {relative_path}: {e}"))
+            return False
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+    
+    def _create_ftp_dirs(self, ftp, remote_full_dir: str):
+        """Cria recursivamente diretórios no servidor FTP."""
+        if not remote_full_dir or remote_full_dir == '/':
+            return
+        
+        from ftplib import error_perm
+        parts = remote_full_dir.split('/')
+        current_dir = ""
+        for part in parts:
+            if not part: continue
+            
+            if not current_dir and remote_full_dir.startswith('/'):
+                current_dir = f"/{part}"
+            else:
+                current_dir = f"{current_dir}/{part}" if current_dir else part
+                
+            try:
+                ftp.cwd(current_dir)
+            except error_perm:
+                try:
+                    ftp.mkd(current_dir)
+                except error_perm:
+                    pass  # Ignora se já existe
+    
+    def _create_ssh_dirs(self, sftp, remote_full_dir: str):
+        """Cria recursivamente diretórios no servidor SSH."""
+        if not remote_full_dir or remote_full_dir == '/':
+            return
+        
+        parts = remote_full_dir.split('/')
+        current_dir = ""
+        for part in parts:
+            if not part: continue
+            
+            if not current_dir and remote_full_dir.startswith('/'):
+                current_dir = f"/{part}"
+            else:
+                current_dir = f"{current_dir}/{part}" if current_dir else part
+                
+            try:
+                sftp.stat(current_dir)
+            except FileNotFoundError:
+                try:
+                    sftp.mkdir(current_dir)
+                except Exception:
+                    pass  # Ignora se já existe
 
     def _append_log_sync(self, text: str, tag: str):
         self.log_display_sync.configure(state=tk.NORMAL)

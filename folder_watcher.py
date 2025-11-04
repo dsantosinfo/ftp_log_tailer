@@ -12,6 +12,53 @@ SYNC_MSG_STATUS = "STATUS"
 SYNC_MSG_SUCCESS = "SUCCESS"
 SYNC_MSG_ERROR = "ERROR"
 
+# Padrões de arquivos e pastas a serem ignorados
+IGNORED_PATTERNS = {
+    # Controle de versão
+    '.git', '.svn', '.hg', '.bzr',
+    # Ambientes virtuais Python
+    'venv', '.venv', 'env', '.env', '__pycache__', '.pytest_cache',
+    # Node.js
+    'node_modules', '.npm', '.yarn',
+    # IDEs e editores
+    '.vscode', '.idea', '.vs', '*.swp', '*.swo', '*~',
+    # Build e distribuição
+    'build', 'dist', 'target', 'bin', 'obj', '.gradle',
+    # Logs e temporários
+    '*.log', '*.tmp', '.DS_Store', 'Thumbs.db',
+    # Configurações específicas
+    '.gitignore', '.dockerignore', '.eslintrc*', '.prettierrc*'
+}
+
+def should_ignore_path(file_path: str) -> bool:
+    """Verifica se um arquivo ou pasta deve ser ignorado."""
+    path_parts = os.path.normpath(file_path).split(os.sep)
+    file_name = os.path.basename(file_path)
+    
+    # Verifica cada parte do caminho
+    for part in path_parts:
+        if part in IGNORED_PATTERNS:
+            return True
+        # Verifica padrões com wildcards
+        for pattern in IGNORED_PATTERNS:
+            if '*' in pattern:
+                import fnmatch
+                if fnmatch.fnmatch(part, pattern):
+                    return True
+    
+    # Verifica o nome do arquivo especificamente
+    if file_name in IGNORED_PATTERNS:
+        return True
+    
+    # Verifica padrões com wildcards no nome do arquivo
+    for pattern in IGNORED_PATTERNS:
+        if '*' in pattern:
+            import fnmatch
+            if fnmatch.fnmatch(file_name, pattern):
+                return True
+    
+    return False
+
 class BaseUploadHandler(FileSystemEventHandler):
     """
     Classe base para manipuladores de upload (FTP/SSH).
@@ -44,11 +91,11 @@ class BaseUploadHandler(FileSystemEventHandler):
         raise NotImplementedError
 
     def on_created(self, event):
-        if not event.is_directory:
+        if not event.is_directory and not should_ignore_path(event.src_path):
             threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
 
     def on_modified(self, event):
-        if not event.is_directory:
+        if not event.is_directory and not should_ignore_path(event.src_path):
             threading.Thread(target=self._upload_file, args=(event.src_path,), daemon=True).start()
 
 
@@ -103,6 +150,10 @@ class FTPUploadHandler(BaseUploadHandler):
         """Thread de trabalho para fazer o upload de um único arquivo."""
         if not os.path.isfile(local_event_path):
             self._log(SYNC_MSG_STATUS, f"Ignorando (não é arquivo): {local_event_path}")
+            return
+        
+        if should_ignore_path(local_event_path):
+            self._log(SYNC_MSG_STATUS, f"Ignorando arquivo (padrão filtrado): {os.path.basename(local_event_path)}")
             return
 
         file_name = os.path.basename(local_event_path)
@@ -208,6 +259,10 @@ class SSHUploadHandler(BaseUploadHandler):
         """Thread de trabalho para fazer o upload de um único arquivo via SSH."""
         if not os.path.isfile(local_event_path):
             self._log(SYNC_MSG_STATUS, f"Ignorando (não é arquivo): {local_event_path}")
+            return
+        
+        if should_ignore_path(local_event_path):
+            self._log(SYNC_MSG_STATUS, f"Ignorando arquivo SSH (padrão filtrado): {os.path.basename(local_event_path)}")
             return
 
         file_name = os.path.basename(local_event_path)

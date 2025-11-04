@@ -18,6 +18,7 @@ A aplicação utiliza threads para o monitoramento (polling) do FTP e sincroniza
 - [Como Usar](#-como-usar)
 - [Empacotamento](#-empacotamento-deploy)
 - [Solução de Problemas](#-solução-de-problemas)
+- [Changelog](#-changelog)
 - [Contribuição](#-contribuição)
 - [Licença](#-licença)
 - [Desenvolvedor](#-desenvolvedor)
@@ -39,6 +40,8 @@ A aplicação agora possui uma interface organizada em abas:
 #### 📁 Aba 2: Sincronização de Pastas
 * **Monitoramento Local:** Monitora pastas locais em tempo real usando `watchdog` para detectar criação, modificação e exclusão de arquivos.
 * **Sincronização Automática:** Envia automaticamente arquivos novos/modificados para destinos FTP ou SSH configurados.
+* **Upload em Lote:** Botão "Carregar Todos" permite fazer upload de todos os arquivos existentes na pasta local para o servidor remoto.
+* **Filtragem Inteligente:** Ignora automaticamente arquivos e pastas de desenvolvimento (`.git`, `node_modules`, `venv`, `__pycache__`, etc.).
 * **Gerenciador de Tarefas:** Crie, edite e exclua tarefas de sincronização com configurações específicas (pasta local, pasta remota, site FTP/SSH).
 * **Log de Atividades:** Visualize em tempo real todas as operações de sincronização realizadas.
 * **Execução Independente:** Cada tarefa de sincronização é executada em sua própria thread de serviço.
@@ -115,9 +118,27 @@ Na primeira execução, dois arquivos serão criados na pasta raiz:
    * Clique em "Iniciar Sincronização"
    * O monitoramento da pasta local começará automaticamente
 
-3. **Visualizar Atividades:**
+3. **Upload em Lote (Opcional):**
+   * Selecione uma tarefa na lista
+   * Clique em "Carregar Todos" para enviar todos os arquivos existentes
+   * Útil para sincronização inicial ou backup completo
+
+4. **Visualizar Atividades:**
    * O log de sincronização mostrará todas as operações em tempo real
    * Status de cada arquivo (enviado, falha, ignorado)
+   * Arquivos filtrados são automaticamente ignorados (ex: `.git`, `node_modules`)
+
+### Arquivos e Pastas Ignorados Automaticamente
+
+A aplicação ignora automaticamente os seguintes padrões para evitar sincronizar arquivos desnecessários:
+
+* **Controle de Versão:** `.git`, `.svn`, `.hg`, `.bzr`
+* **Ambientes Virtuais Python:** `venv`, `.venv`, `env`, `.env`, `__pycache__`, `.pytest_cache`
+* **Node.js:** `node_modules`, `.npm`, `.yarn`
+* **IDEs e Editores:** `.vscode`, `.idea`, `.vs`, `*.swp`, `*.swo`, `*~`
+* **Build e Distribuição:** `build`, `dist`, `target`, `bin`, `obj`, `.gradle`
+* **Logs e Temporários:** `*.log`, `*.tmp`, `.DS_Store`, `Thumbs.db`
+* **Configurações:** `.gitignore`, `.dockerignore`, `.eslintrc*`, `.prettierrc*`
 
 ## 📦 Empacotamento (Deploy)
 
@@ -130,7 +151,7 @@ Para distribuir como executável único:
 
 2. **Execute o comando de empacotamento:**
    ```bash
-   pyinstaller --onefile --noconsole --name="FTPLogTailer" app_tk.py
+   pyinstaller --onefile --noconsole --name="FTP_Utilities" app_tk.py --icon=icon.ico
    ```
 
 3. **Distribua o executável:**
@@ -167,6 +188,23 @@ Para distribuir como executável único:
   * Verifique se a tarefa está ativa
   * Confirme se o monitoramento local está funcionando
   * Verifique o log de sincronização para erros
+
+## 📝 Changelog
+
+### Versão 1.2
+**04-11-2023:**
+
+#### ✨ Novas Funcionalidades
+- **feat:** Adicionar funcionalidade de upload em lote para FTP/SSH na interface
+  - Botão "Carregar Todos" na aba de Sincronização de Pastas
+  - Permite upload de todos os arquivos existentes na pasta local
+  - Útil para sincronização inicial e backup completo
+  - Execução em thread separada para não travar a interface
+- **feat:** Filtragem automática de arquivos e pastas de desenvolvimento
+  - Ignora automaticamente `.git`, `node_modules`, `venv`, `__pycache__`, etc.
+  - Evita sincronizar arquivos desnecessários
+  - Melhora performance e reduz transferência de dados
+  - Funciona tanto no monitoramento em tempo real quanto no upload em lote
 
 ## 🤝 Contribuição
 
