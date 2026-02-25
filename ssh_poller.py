@@ -33,6 +33,11 @@ class SSHLogPoller(threading.Thread):
         self.current_size = 0
         self.ssh = None
         self.sftp = None
+        
+        # --- (NOVO) Controle de Reconexão Automática ---
+        self.max_reconnect_attempts = 10  # Máximo de tentativas
+        self.reconnect_delay_base = 5     # Delay base em segundos
+        self.reconnect_attempts = 0       # Contador de tentativas
 
     def _send_to_queue(self, msg_type: str, message: str):
         """Envia dados para a fila de forma padronizada."""
@@ -132,6 +137,35 @@ class SSHLogPoller(threading.Thread):
             finally:
                 self.ssh = None
 
+    def _reconnect_with_backoff(self) -> bool:
+        """
+        Tenta reconectar com backoff exponencial.
+        Retorna True se reconectou com sucesso, False caso contrário.
+        """
+        if self.reconnect_attempts >= self.max_reconnect_attempts:
+            self._send_to_queue(MSG_TYPE_ERROR, 
+                f"Máximo de tentativas de reconexão atingido ({self.max_reconnect_attempts}). Parando monitoramento.")
+            return False
+        
+        # Calcula o delay com backoff exponencial
+        delay = min(self.reconnect_delay_base * (2 ** self.reconnect_attempts), 300)  # Máximo de 5 minutos
+        self.reconnect_attempts += 1
+        
+        self._send_to_queue(MSG_TYPE_STATUS, 
+            f"Tentativa de reconexão {self.reconnect_attempts}/{self.max_reconnect_attempts} em {delay}s...")
+        
+        # Aguarda o delay (mas pode ser interrompido pelo stop_event)
+        if self._stop_event.wait(delay):
+            return False  # Foi solicitado parar
+        
+        # Tenta reconectar
+        self._disconnect()  # Garante que a conexão antiga está fechada
+        if self._connect():
+            self.reconnect_attempts = 0  # Reseta o contador em caso de sucesso
+            return True
+        
+        return False
+
     def run(self):
         """O loop principal da thread de monitoramento."""
         self._send_to_queue(MSG_TYPE_STATUS, f"Iniciando monitoramento SSH para: {self.remote_log_path}")
@@ -139,20 +173,35 @@ class SSHLogPoller(threading.Thread):
         initial_size = self._get_remote_size()
         
         if initial_size == -1:
-            self._send_to_queue(MSG_TYPE_ERROR, "Falha ao obter tamanho inicial.")
-        else:
-            self.current_size = initial_size
-            self._send_to_queue(MSG_TYPE_STATUS, f"Monitoramento SSH iniciado. Tamanho atual: {self.current_size} bytes.")
-            self._send_to_queue(MSG_TYPE_LOG, "--- [ Monitoramento SSH iniciado - Aguardando novos dados ] ---")
+            self._send_to_queue(MSG_TYPE_ERROR, "Falha ao obter tamanho inicial (verifique o caminho, permissões ou log de erros).")
+            # Tenta reconectar com backoff antes de iniciar o loop principal
+            if not self._reconnect_with_backoff():
+                return  # Falhou ao reconectar, para a thread
+            # Tenta obter o tamanho novamente após reconectar
+            initial_size = self._get_remote_size()
+            if initial_size == -1:
+                self._send_to_queue(MSG_TYPE_ERROR, "Falha persistente ao obter tamanho inicial. Parando.")
+                return
+        
+        self.current_size = initial_size
+        self._send_to_queue(MSG_TYPE_STATUS, f"Monitoramento SSH iniciado. Tamanho atual: {self.current_size} bytes.")
+        self._send_to_queue(MSG_TYPE_LOG, "--- [ Monitoramento SSH iniciado - Aguardando novos dados ] ---")
 
         while not self._stop_event.is_set():
             try:
                 new_size = self._get_remote_size()
 
                 if new_size == -1:
-                    self._send_to_queue(MSG_TYPE_ERROR, "Aguardando reconexão...")
+                    # Conexão perdida - tenta reconectar com backoff
+                    self._send_to_queue(MSG_TYPE_ERROR, "Conexão perdida. Iniciando reconexão automática...")
+                    if not self._reconnect_with_backoff():
+                        break  # Falhou ao reconectar, sai do loop
+                    continue  # Tenta novamente após reconectar
                 
-                elif new_size > self.current_size:
+                # Reseta o contador de tentativas em caso de sucesso
+                self.reconnect_attempts = 0
+                
+                if new_size > self.current_size:
                     self._send_to_queue(MSG_TYPE_STATUS, f"Arquivo cresceu. Novo tamanho: {new_size} bytes.")
                     self._fetch_new_data()
                     self.current_size = new_size

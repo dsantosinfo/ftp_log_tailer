@@ -199,19 +199,65 @@ class ConfigManager:
         """Retorna o dicionário de tarefas de sincronização."""
         return self.configs.get('sync_jobs', {})
 
-    def save_sync_job(self, job_name: str, site_name: str, local_path: str, remote_path: str):
+    def save_sync_job(self, job_name: str, site_name: str, local_path: str, remote_path: str, active: bool = True):
         """Salva ou atualiza uma tarefa de sincronização."""
         if not all([job_name, site_name, local_path, remote_path]):
             raise ValueError("Todos os campos (Nome, Site, Local, Remoto) são obrigatórios.")
         if site_name not in self.get_sites():
             raise ValueError(f"Site '{site_name}' não encontrado nas configurações.")
         
+        # Preserva o estado 'active' se a tarefa já existir
+        existing_job = self.configs['sync_jobs'].get(job_name, {})
+        
         self.configs['sync_jobs'][job_name] = {
             'site_name': site_name,
             'local_path': local_path,
-            'remote_path': remote_path
+            'remote_path': remote_path,
+            'active': active if active is not None else existing_job.get('active', True)
         }
         self._save_configs(self.configs)
+
+    def toggle_sync_job(self, job_name: str) -> bool:
+        """Ativa ou desativa uma tarefa de sincronização. Retorna o novo estado."""
+        if job_name not in self.configs['sync_jobs']:
+            raise ValueError(f"Tarefa '{job_name}' não encontrada.")
+        
+        current_state = self.configs['sync_jobs'][job_name].get('active', True)
+        new_state = not current_state
+        self.configs['sync_jobs'][job_name]['active'] = new_state
+        self._save_configs(self.configs)
+        return new_state
+    
+    def update_sync_job(self, job_name: str, site_name: str, local_path: str, remote_path: str):
+        """Atualiza os dados de uma tarefa de sincronização existente."""
+        if job_name not in self.configs['sync_jobs']:
+            raise ValueError(f"Tarefa '{job_name}' não encontrada.")
+        if site_name not in self.get_sites():
+            raise ValueError(f"Site '{site_name}' não encontrado nas configurações.")
+        
+        # Preserva o estado 'active' existente
+        current_active = self.configs['sync_jobs'][job_name].get('active', True)
+        
+        self.configs['sync_jobs'][job_name] = {
+            'site_name': site_name,
+            'local_path': local_path,
+            'remote_path': remote_path,
+            'active': current_active
+        }
+        self._save_configs(self.configs)
+    
+    def update_sync_job_active(self, job_name: str, active: bool):
+        """Atualiza apenas o estado ativo/inativo de uma tarefa."""
+        if job_name not in self.configs['sync_jobs']:
+            raise ValueError(f"Tarefa '{job_name}' não encontrada.")
+        
+        self.configs['sync_jobs'][job_name]['active'] = active
+        self._save_configs(self.configs)
+
+    def is_sync_job_active(self, job_name: str) -> bool:
+        """Verifica se uma tarefa de sincronização está ativa."""
+        job = self.configs['sync_jobs'].get(job_name, {})
+        return job.get('active', True)
 
     def delete_sync_job(self, job_name: str, save: bool = True):
         """Remove uma tarefa de sincronização."""
@@ -219,3 +265,14 @@ class ConfigManager:
             del self.configs['sync_jobs'][job_name]
             if save:
                 self._save_configs(self.configs)
+
+    # --- Window Layout (NOVO) ---
+
+    def get_window_layout(self) -> dict:
+        """Retorna as configurações de layout da janela."""
+        return self.configs.get('window_layout', {})
+
+    def save_window_layout(self, layout: dict):
+        """Salva as configurações de layout da janela."""
+        self.configs['window_layout'] = layout
+        self._save_configs(self.configs)

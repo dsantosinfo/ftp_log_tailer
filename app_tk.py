@@ -3,7 +3,7 @@ from tkinter import ttk, simpledialog, messagebox, scrolledtext, font, filedialo
 import queue
 import threading
 import os
-import sys # (NOVO) Importado para o resource_path
+import sys
 from ftplib import FTP
 
 from config_manager import ConfigManager
@@ -13,17 +13,11 @@ from ftp_browser import FTPBrowserWindow
 from ssh_browser import SSHBrowserWindow
 from folder_watcher import SyncService, SYNC_MSG_STATUS, SYNC_MSG_SUCCESS, SYNC_MSG_ERROR, should_ignore_path
 
-# (NOVO) FUNÇÃO PARA GARANTIR QUE O ÍCONE SEJA ENCONTRADO (DEV E EXE)
-def resource_path(relative_path):
-    """ Retorna o caminho absoluto para o recurso, funcionando em dev e no PyInstaller """
-    try:
-        # PyInstaller cria uma pasta temp e armazena o caminho em _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        # Modo de desenvolvimento (não está no bundle PyInstaller)
-        base_path = os.path.abspath(os.path.dirname(__file__))
-
-    return os.path.join(base_path, relative_path)
+from utils.resources import resource_path
+from ui.widgets import ToolTip
+from ui.site_manager import SiteManagerWindow
+from ui.sync_job_manager import SyncJobManagerWindow
+from services.upload_service import UploadService
 
 class FTPLogTailerApp:
     
@@ -46,7 +40,14 @@ class FTPLogTailerApp:
         self.log_tailer_queue = queue.Queue()
         self.folder_sync_queue = queue.Queue()  
         self.poller_thread = None  
-        self.sync_service_thread = None  
+        self.sync_service_thread = None
+        
+        # --- (NOVO) Controle de Upload ---
+        self.upload_cancel_flag = False
+        self.upload_in_progress = False
+        
+        # --- (NOVO) Serviço de Upload ---
+        self.upload_service = UploadService(self.config_manager, self.folder_sync_queue)
         
         self._setup_styles()
         self._create_main_widgets()
@@ -97,8 +98,10 @@ class FTPLogTailerApp:
         self.fav_combo.bind("<<ComboboxSelected>>", self._on_favorite_selected)
         self.fav_save_btn = ttk.Button(fav_frame, text="Salvar Favorito...", command=self._save_favorite)
         self.fav_save_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.fav_save_btn, "Salvar caminho atual como favorito")
         self.fav_del_btn = ttk.Button(fav_frame, text="Excluir Favorito", command=self._delete_favorite, state=tk.DISABLED)
         self.fav_del_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.fav_del_btn, "Excluir favorito selecionado")
 
         control_frame = ttk.Frame(config_frame)
         control_frame.pack(fill='x')
@@ -108,10 +111,13 @@ class FTPLogTailerApp:
         self.site_combo.bind("<<ComboboxSelected>>", self._on_site_selected)
         self.manage_sites_btn = ttk.Button(control_frame, text="Gerenciar Sites...", command=self._open_site_manager)
         self.manage_sites_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.manage_sites_btn, "Abrir gerenciador de sites FTP/SSH")
         self.start_btn = ttk.Button(control_frame, text="Iniciar", command=self._start_monitoring)
         self.start_btn.pack(side=tk.LEFT, padx=(20, 5))
+        ToolTip(self.start_btn, "Iniciar monitoramento do log")
         self.stop_btn = ttk.Button(control_frame, text="Parar", command=self._stop_monitoring, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.stop_btn, "Parar monitoramento")
         
         path_frame = ttk.Frame(config_frame, padding=(0, 10, 0, 0))
         path_frame.pack(fill='x')
@@ -139,6 +145,9 @@ class FTPLogTailerApp:
         self.log_display_tailer.tag_configure("LOG", foreground="#cccccc")     
         self.log_display_tailer.tag_configure("HIGHLIGHT", background="#4a4a4a")
         self.log_display_tailer.pack(fill='both', expand=True, pady=(0, 5))
+        # Menu de contexto
+        self.log_display_tailer.bind("<Button-3>", self._show_tailer_context_menu)
+        self._create_tailer_context_menu()
 
     # --- Início: Aba 2 (Folder Sync) ---
 
@@ -147,8 +156,10 @@ class FTPLogTailerApp:
         sync_control_frame.pack(fill='x')
         self.sync_start_btn = ttk.Button(sync_control_frame, text="Iniciar Sincronização", command=self._start_sync_service)
         self.sync_start_btn.pack(side=tk.LEFT)
+        ToolTip(self.sync_start_btn, "Iniciar monitoramento de pastas")
         self.sync_stop_btn = ttk.Button(sync_control_frame, text="Parar Sincronização", command=self._stop_sync_service, state=tk.DISABLED)
         self.sync_stop_btn.pack(side=tk.LEFT, padx=10)
+        ToolTip(self.sync_stop_btn, "Parar monitoramento")
 
         sync_main_frame = ttk.Frame(parent_frame, padding=(0, 10))
         sync_main_frame.pack(fill='both', expand=True)
@@ -156,30 +167,86 @@ class FTPLogTailerApp:
         jobs_frame = ttk.Labelframe(sync_main_frame, text="Pastas Monitoradas", padding="5")
         jobs_frame.pack(side=tk.LEFT, fill='y', padx=(0, 10))
 
-        self.sync_jobs_tree = ttk.Treeview(jobs_frame, columns=("Site", "Local", "Remoto"), selectmode="browse", height=10)
+        # --- (NOVO) TreeView com scrollbars horizontal e vertical ---
+        tree_container = ttk.Frame(jobs_frame)
+        tree_container.pack(fill='both', expand=True)
+        
+        # Scrollbar vertical
+        tree_v_scroll = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        tree_v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Scrollbar horizontal
+        tree_h_scroll = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL)
+        tree_h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # TreeView com coluna de Status (ativo/inativo)
+        self.sync_jobs_tree = ttk.Treeview(
+            tree_container, 
+            columns=("Status", "Site", "Local", "Remoto"), 
+            selectmode="browse", 
+            height=10,
+            yscrollcommand=tree_v_scroll.set,
+            xscrollcommand=tree_h_scroll.set
+        )
         self.sync_jobs_tree.heading("#0", text="Nome Tarefa")
+        self.sync_jobs_tree.heading("Status", text="Status")
         self.sync_jobs_tree.heading("Site", text="Site FTP")
         self.sync_jobs_tree.heading("Local", text="Pasta Local")
         self.sync_jobs_tree.heading("Remoto", text="Pasta Remota")
-        self.sync_jobs_tree.column("#0", width=150, stretch=tk.NO)
-        self.sync_jobs_tree.column("Site", width=100, stretch=tk.NO)
-        self.sync_jobs_tree.column("Local", width=250, stretch=tk.YES)
-        self.sync_jobs_tree.column("Remoto", width=250, stretch=tk.YES)
-        self.sync_jobs_tree.pack(fill='both', expand=True)
+        
+        # Configuração das colunas com stretch habilitado
+        self.sync_jobs_tree.column("#0", width=150, minwidth=100, stretch=False)
+        self.sync_jobs_tree.column("Status", width=70, minwidth=60, stretch=False, anchor="center")
+        self.sync_jobs_tree.column("Site", width=100, minwidth=80, stretch=False)
+        self.sync_jobs_tree.column("Local", width=250, minwidth=150, stretch=True)
+        self.sync_jobs_tree.column("Remoto", width=250, minwidth=150, stretch=True)
+        
+        self.sync_jobs_tree.pack(side=tk.LEFT, fill='both', expand=True)
+        
+        # Configura scrollbars
+        tree_v_scroll.config(command=self.sync_jobs_tree.yview)
+        tree_h_scroll.config(command=self.sync_jobs_tree.xview)
+        
         self.sync_jobs_tree.bind("<<TreeviewSelect>>", self._on_sync_job_select)
 
         jobs_btn_frame = ttk.Frame(jobs_frame)
         jobs_btn_frame.pack(fill='x', pady=5)
         self.sync_add_btn = ttk.Button(jobs_btn_frame, text="Adicionar...", command=self._add_sync_job)
         self.sync_add_btn.pack(side=tk.LEFT)
+        ToolTip(self.sync_add_btn, "Adicionar nova tarefa de sincronização")
+        self.sync_edit_btn = ttk.Button(jobs_btn_frame, text="Editar", command=self._edit_sync_job, state=tk.DISABLED)
+        self.sync_edit_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.sync_edit_btn, "Editar tarefa selecionada")
         self.sync_del_btn = ttk.Button(jobs_btn_frame, text="Remover", command=self._remove_sync_job, state=tk.DISABLED)
         self.sync_del_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.sync_del_btn, "Excluir tarefa selecionada")
+        self.sync_toggle_btn = ttk.Button(jobs_btn_frame, text="Desativar", command=self._toggle_sync_job, state=tk.DISABLED)
+        self.sync_toggle_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.sync_toggle_btn, "Ativar/Desativar tarefa")
         self.upload_all_btn = ttk.Button(jobs_btn_frame, text="Carregar Todos", command=self._upload_all_files, state=tk.DISABLED)
         self.upload_all_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.upload_all_btn, "Fazer upload de todos os arquivos")
+        
+        # --- (NOVO) Barra de Progresso de Upload ---
+        progress_frame = ttk.Frame(jobs_frame)
+        progress_frame.pack(fill='x', pady=5)
+        self.upload_progress_var = tk.DoubleVar(value=0)
+        self.upload_progressbar = ttk.Progressbar(progress_frame, variable=self.upload_progress_var, maximum=100, length=200)
+        self.upload_progressbar.pack(side=tk.LEFT, padx=5)
+        self.upload_progress_label = ttk.Label(progress_frame, text="")
+        self.upload_progress_label.pack(side=tk.LEFT, padx=5)
+        self.upload_cancel_btn = ttk.Button(progress_frame, text="Cancelar", command=self._cancel_upload, state=tk.DISABLED)
+        self.upload_cancel_btn.pack(side=tk.LEFT, padx=5)
 
         log_frame = ttk.Labelframe(sync_main_frame, text="Log de Sincronização", padding="5")
         log_frame.pack(fill='both', expand=True)
 
+        # --- (NOVO) Frame de botões do log de sincronização ---
+        sync_log_btn_frame = ttk.Frame(log_frame)
+        sync_log_btn_frame.pack(fill='x', pady=(0, 5))
+        self.clear_sync_log_btn = ttk.Button(sync_log_btn_frame, text="Limpar Log", command=self._clear_sync_log)
+        self.clear_sync_log_btn.pack(side=tk.LEFT)
+        
         self.log_display_sync = scrolledtext.ScrolledText(log_frame, state=tk.DISABLED)
         self.log_display_sync.configure(font=self.log_font, bg="#2b2b2b", fg="#cccccc", wrap=tk.WORD, insertbackground="#ffffff")
         self.log_display_sync.tag_configure(SYNC_MSG_STATUS, foreground="#808080")  
@@ -435,24 +502,87 @@ class FTPLogTailerApp:
         self.log_display_tailer.see(tk.END)  
         self.log_display_tailer.configure(state=tk.DISABLED)
 
+    # --- Métodos de Menu de Contexto ---
+    
+    def _create_tailer_context_menu(self):
+        """Cria o menu de contexto para o log do tailer."""
+        self.tailer_context_menu = tk.Menu(self.root, tearoff=0)
+        self.tailer_context_menu.add_command(label="Copiar", command=self._copy_selected_text)
+        self.tailer_context_menu.add_command(label="Copiar Tudo", command=self._copy_log)
+        self.tailer_context_menu.add_separator()
+        self.tailer_context_menu.add_command(label="Limpar Log", command=self._clear_log)
+        self.tailer_context_menu.add_command(label="Exportar Log...", command=self._export_log)
+        self.tailer_context_menu.add_separator()
+        self.tailer_context_menu.add_command(label="Selecionar Tudo", command=self._select_all_log)
+    
+    def _show_tailer_context_menu(self, event):
+        """Mostra o menu de contexto na posição do cursor."""
+        try:
+            self.tailer_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.tailer_context_menu.grab_release()
+    
+    def _copy_selected_text(self):
+        """Copia o texto selecionado no log."""
+        try:
+            selected_text = self.log_display_tailer.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected_text)
+            self.status_bar.config(text="Texto copiado.")
+        except tk.TclError:
+            # Nenhum texto selecionado
+            self.status_bar.config(text="Nenhum texto selecionado.")
+    
+    def _select_all_log(self):
+        """Seleciona todo o texto do log."""
+        self.log_display_tailer.configure(state=tk.NORMAL)
+        self.log_display_tailer.tag_add(tk.SEL, "1.0", tk.END)
+        self.log_display_tailer.configure(state=tk.DISABLED)
+
     # --- Lógica Específica da Aba 2 (Folder Sync) ---
     
     def _load_sync_jobs_to_treeview(self):
+        """Carrega as tarefas de sincronização no TreeView com indicador visual de status."""
         self.sync_jobs_tree.delete(*self.sync_jobs_tree.get_children())
         jobs = self.config_manager.get_sync_jobs()
         for name, details in jobs.items():
+            # Indicador visual de status
+            is_active = details.get('active', True)
+            status_text = "✓ Ativo" if is_active else "✗ Inativo"
+            
             self.sync_jobs_tree.insert("", "end", iid=name, text=name,  
-                values=(details.get('site_name', 'N/A'), details.get('local_path', 'N/A'), details.get('remote_path', 'N/A'))
+                values=(
+                    status_text,
+                    details.get('site_name', 'N/A'), 
+                    details.get('local_path', 'N/A'), 
+                    details.get('remote_path', 'N/A')
+                )
             )
         self.sync_del_btn.config(state=tk.DISABLED)
 
     def _on_sync_job_select(self, event):
         if self.sync_jobs_tree.focus():
+            self.sync_edit_btn.config(state=tk.NORMAL)
             self.sync_del_btn.config(state=tk.NORMAL)
+            self.sync_toggle_btn.config(state=tk.NORMAL)
             self.upload_all_btn.config(state=tk.NORMAL)
+            # Atualiza texto do botão de toggle baseado no estado da tarefa
+            self._update_toggle_button_text()
         else:
+            self.sync_edit_btn.config(state=tk.DISABLED)
             self.sync_del_btn.config(state=tk.DISABLED)
+            self.sync_toggle_btn.config(state=tk.DISABLED)
             self.upload_all_btn.config(state=tk.DISABLED)
+    
+    def _update_toggle_button_text(self):
+        """Atualiza o texto do botão de toggle baseado no estado da tarefa."""
+        selected_iid = self.sync_jobs_tree.focus()
+        if not selected_iid:
+            return
+        all_jobs = self.config_manager.get_sync_jobs()
+        job_details = all_jobs.get(selected_iid, {})
+        is_active = job_details.get('active', True)
+        self.sync_toggle_btn.config(text="Desativar" if is_active else "Ativar")
 
     def _add_sync_job(self):
         sites = list(self.config_manager.get_sites().keys())
@@ -462,6 +592,69 @@ class FTPLogTailerApp:
             self._open_site_manager()
             return
         SyncJobManagerWindow(self.root, self.config_manager, sites, self._load_sync_jobs_to_treeview)
+    
+    def _edit_sync_job(self):
+        """Abre a janela para editar uma tarefa existente."""
+        selected_iid = self.sync_jobs_tree.focus()
+        if not selected_iid:
+            return
+        
+        sites = list(self.config_manager.get_sites().keys())
+        if not sites:
+            messagebox.showwarning("Sem Sites", "Configure um Site antes de editar uma tarefa.", parent=self.root)
+            return
+        
+        # Obtém dados atuais da tarefa
+        all_jobs = self.config_manager.get_sync_jobs()
+        job_details = all_jobs.get(selected_iid)
+        if not job_details:
+            messagebox.showerror("Erro", f"Tarefa '{selected_iid}' não encontrada.", parent=self.root)
+            return
+        
+        # Abre a janela em modo de edição
+        SyncJobManagerWindow(
+            self.root, 
+            self.config_manager, 
+            sites, 
+            self._load_sync_jobs_to_treeview,
+            edit_mode=True,
+            edit_job_name=selected_iid,
+            edit_job_details=job_details
+        )
+    
+    def _toggle_sync_job(self):
+        """Ativa ou desativa uma tarefa de sincronização."""
+        selected_iid = self.sync_jobs_tree.focus()
+        if not selected_iid:
+            return
+        
+        all_jobs = self.config_manager.get_sync_jobs()
+        job_details = all_jobs.get(selected_iid)
+        if not job_details:
+            return
+        
+        # Inverte o estado
+        current_active = job_details.get('active', True)
+        new_active = not current_active
+        
+        # Atualiza no config_manager
+        self.config_manager.update_sync_job_active(selected_iid, new_active)
+        
+        # Atualiza o indicador visual no TreeView
+        status_text = "✓ Ativo" if new_active else "✗ Inativo"
+        self.sync_jobs_tree.item(selected_iid, values=(
+            status_text,
+            job_details.get('site_name', 'N/A'),
+            job_details.get('local_path', 'N/A'),
+            job_details.get('remote_path', 'N/A')
+        ))
+        
+        # Atualiza o texto do botão
+        self._update_toggle_button_text()
+        
+        # Feedback
+        status_msg = "ativada" if new_active else "desativada"
+        self.status_bar.config(text=f"Tarefa '{selected_iid}' {status_msg}.")
 
     def _remove_sync_job(self):
         selected_iid = self.sync_jobs_tree.focus()
@@ -514,10 +707,38 @@ class FTPLogTailerApp:
         self.upload_all_btn.config(state=tk.DISABLED if monitoring else (tk.NORMAL if self.sync_jobs_tree.focus() else tk.DISABLED))
         if not monitoring: self.sync_service_thread = None
 
+    def _cancel_upload(self):
+        """Cancela o upload em andamento."""
+        self.upload_cancel_flag = True
+        self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, "Cancelando upload..."))
+    
+    def _update_upload_progress(self, current: int, total: int, filename: str = ""):
+        """Atualiza a barra de progresso do upload (chamado via root.after)."""
+        if total > 0:
+            percent = (current / total) * 100
+            self.upload_progress_var.set(percent)
+            if filename:
+                self.upload_progress_label.config(text=f"{current}/{total} - {filename[:30]}...")
+            else:
+                self.upload_progress_label.config(text=f"{current}/{total} arquivos")
+    
+    def _reset_upload_progress(self):
+        """Reseta a barra de progresso do upload."""
+        self.upload_progress_var.set(0)
+        self.upload_progress_label.config(text="")
+        self.upload_in_progress = False
+        self.upload_cancel_flag = False
+        self.upload_all_btn.config(state=tk.NORMAL, text="Carregar Todos")
+        self.upload_cancel_btn.config(state=tk.DISABLED)
+
     def _upload_all_files(self):
         """Faz upload de todos os arquivos da pasta local selecionada para o servidor remoto."""
         selected_iid = self.sync_jobs_tree.focus()
         if not selected_iid:
+            return
+        
+        if self.upload_in_progress:
+            messagebox.showwarning("Upload em Andamento", "Já existe um upload em andamento.", parent=self.root)
             return
         
         # Confirmação do usuário
@@ -548,7 +769,14 @@ class FTPLogTailerApp:
             messagebox.showerror("Erro", f"Pasta local '{local_path}' não existe.", parent=self.root)
             return
         
-        # Inicia o upload em uma thread separada
+        # Configura estado inicial
+        self.upload_in_progress = True
+        self.upload_cancel_flag = False
+        self.upload_all_btn.config(state=tk.DISABLED)
+        self.upload_cancel_btn.config(state=tk.NORMAL)
+        self.upload_progress_label.config(text="Preparando...")
+        
+        # Inicia o upload em uma thread separada usando o serviço
         upload_config = {
             **site_config,
             'local_path': local_path,
@@ -557,456 +785,24 @@ class FTPLogTailerApp:
         }
         
         upload_thread = threading.Thread(
-            target=self._bulk_upload_worker,
-            args=(upload_config,),
+            target=self.upload_service.bulk_upload_worker,
+            args=(upload_config, self.root),
             daemon=True
         )
         upload_thread.start()
-        
-        # Desabilita o botão temporariamente
-        self.upload_all_btn.config(state=tk.DISABLED, text="Carregando...")
-        
-        # Reabilita o botão após 3 segundos (tempo para iniciar o processo)
-        self.root.after(3000, lambda: self.upload_all_btn.config(state=tk.NORMAL, text="Carregar Todos"))
-    
-    def _bulk_upload_worker(self, config: dict):
-        """Worker thread para fazer upload de todos os arquivos."""
-        job_name = config['job_name']
-        local_path = config['local_path']
-        connection_type = config.get('connection_type', 'ftp')
-        
-        try:
-            self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Iniciando upload de todos os arquivos..."))
-            
-            # Conta total de arquivos (excluindo os ignorados)
-            total_files = 0
-            for root, dirs, files in os.walk(local_path):
-                # Filtra diretórios ignorados
-                dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(root, d))]
-                # Conta apenas arquivos não ignorados
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    if not should_ignore_path(file_path):
-                        total_files += 1
-            
-            if total_files == 0:
-                self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Nenhum arquivo encontrado para upload."))
-                return
-            
-            self.folder_sync_queue.put_nowait((SYNC_MSG_STATUS, f"[{job_name}] Encontrados {total_files} arquivos para upload."))
-            
-            uploaded_count = 0
-            failed_count = 0
-            
-            # Percorre todos os arquivos
-            for root, dirs, files in os.walk(local_path):
-                # Filtra diretórios ignorados para não entrar neles
-                dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(root, d))]
-                
-                for file in files:
-                    local_file_path = os.path.join(root, file)
-                    
-                    # Pula arquivos ignorados
-                    if should_ignore_path(local_file_path):
-                        continue
-                    
-                    relative_path = os.path.relpath(local_file_path, local_path)
-                    
-                    # Faz upload do arquivo
-                    if self._upload_single_file(config, local_file_path, relative_path):
-                        uploaded_count += 1
-                    else:
-                        failed_count += 1
-            
-            # Relatório final
-            self.folder_sync_queue.put_nowait((
-                SYNC_MSG_SUCCESS, 
-                f"[{job_name}] Upload concluído! {uploaded_count} arquivos enviados, {failed_count} falharam."
-            ))
-            
-        except Exception as e:
-            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro no upload em lote: {e}"))
-    
-    def _upload_single_file(self, config: dict, local_file_path: str, relative_path: str) -> bool:
-        """Faz upload de um único arquivo. Retorna True se bem-sucedido."""
-        connection_type = config.get('connection_type', 'ftp')
-        job_name = config['job_name']
-        
-        try:
-            if connection_type == 'ssh':
-                return self._upload_file_ssh(config, local_file_path, relative_path)
-            else:
-                return self._upload_file_ftp(config, local_file_path, relative_path)
-        except Exception as e:
-            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro ao enviar {relative_path}: {e}"))
-            return False
-    
-    def _upload_file_ftp(self, config: dict, local_file_path: str, relative_path: str) -> bool:
-        """Upload via FTP."""
-        job_name = config['job_name']
-        remote_path = config['remote_path']
-        
-        ftp = None
-        try:
-            # Conecta
-            ftp = FTP()
-            ftp.connect(config['host'], config['port'], timeout=10)
-            ftp.login(config['user'], config['password'])
-            ftp.set_pasv(True)
-            
-            # Constrói caminho remoto
-            remote_file_path = os.path.join(remote_path, relative_path).replace("\\", "/")
-            remote_dir = os.path.dirname(remote_file_path)
-            
-            # Cria diretórios se necessário
-            self._create_ftp_dirs(ftp, remote_dir)
-            
-            # Upload
-            with open(local_file_path, 'rb') as fp:
-                ftp.storbinary(f'STOR {remote_file_path}', fp)
-            
-            file_size = os.path.getsize(local_file_path)
-            self.folder_sync_queue.put_nowait((SYNC_MSG_SUCCESS, f"[{job_name}] Enviado via FTP: {relative_path} ({file_size} bytes)"))
-            return True
-            
-        except Exception as e:
-            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro FTP ao enviar {relative_path}: {e}"))
-            return False
-        finally:
-            if ftp:
-                try:
-                    ftp.quit()
-                except Exception:
-                    pass
-    
-    def _upload_file_ssh(self, config: dict, local_file_path: str, relative_path: str) -> bool:
-        """Upload via SSH/SFTP."""
-        job_name = config['job_name']
-        remote_path = config['remote_path']
-        
-        ssh = None
-        sftp = None
-        try:
-            # Conecta
-            import paramiko
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(
-                hostname=config['host'],
-                port=config['port'],
-                username=config['user'],
-                password=config['password'],
-                timeout=10
-            )
-            sftp = ssh.open_sftp()
-            
-            # Constrói caminho remoto
-            remote_file_path = os.path.join(remote_path, relative_path).replace("\\", "/")
-            remote_dir = os.path.dirname(remote_file_path)
-            
-            # Cria diretórios se necessário
-            self._create_ssh_dirs(sftp, remote_dir)
-            
-            # Upload
-            sftp.put(local_file_path, remote_file_path)
-            
-            file_size = os.path.getsize(local_file_path)
-            self.folder_sync_queue.put_nowait((SYNC_MSG_SUCCESS, f"[{job_name}] Enviado via SSH: {relative_path} ({file_size} bytes)"))
-            return True
-            
-        except Exception as e:
-            self.folder_sync_queue.put_nowait((SYNC_MSG_ERROR, f"[{job_name}] Erro SSH ao enviar {relative_path}: {e}"))
-            return False
-        finally:
-            if sftp:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-            if ssh:
-                try:
-                    ssh.close()
-                except Exception:
-                    pass
-    
-    def _create_ftp_dirs(self, ftp, remote_full_dir: str):
-        """Cria recursivamente diretórios no servidor FTP."""
-        if not remote_full_dir or remote_full_dir == '/':
-            return
-        
-        from ftplib import error_perm
-        parts = remote_full_dir.split('/')
-        current_dir = ""
-        for part in parts:
-            if not part: continue
-            
-            if not current_dir and remote_full_dir.startswith('/'):
-                current_dir = f"/{part}"
-            else:
-                current_dir = f"{current_dir}/{part}" if current_dir else part
-                
-            try:
-                ftp.cwd(current_dir)
-            except error_perm:
-                try:
-                    ftp.mkd(current_dir)
-                except error_perm:
-                    pass  # Ignora se já existe
-    
-    def _create_ssh_dirs(self, sftp, remote_full_dir: str):
-        """Cria recursivamente diretórios no servidor SSH."""
-        if not remote_full_dir or remote_full_dir == '/':
-            return
-        
-        parts = remote_full_dir.split('/')
-        current_dir = ""
-        for part in parts:
-            if not part: continue
-            
-            if not current_dir and remote_full_dir.startswith('/'):
-                current_dir = f"/{part}"
-            else:
-                current_dir = f"{current_dir}/{part}" if current_dir else part
-                
-            try:
-                sftp.stat(current_dir)
-            except FileNotFoundError:
-                try:
-                    sftp.mkdir(current_dir)
-                except Exception:
-                    pass  # Ignora se já existe
+
+    def _clear_sync_log(self):
+        """Limpa o log de sincronização."""
+        self.log_display_sync.configure(state=tk.NORMAL)
+        self.log_display_sync.delete('1.0', tk.END)
+        self.log_display_sync.configure(state=tk.DISABLED)
+        self.status_bar.config(text="Log de sincronização limpo.")
 
     def _append_log_sync(self, text: str, tag: str):
         self.log_display_sync.configure(state=tk.NORMAL)
         self.log_display_sync.insert(tk.END, text + '\n', (tag,))
         self.log_display_sync.see(tk.END)  
         self.log_display_sync.configure(state=tk.DISABLED)
-
-
-# (Classe SiteManagerWindow - Sem Mudanças)
-# ... (código idêntico ao anterior)
-class SiteManagerWindow(tk.Toplevel):
-    def __init__(self, parent, config_manager: ConfigManager, on_close_callback: callable):
-        super().__init__(parent)
-        self.transient(parent); self.grab_set(); self.title("Gerenciador de Sites (FTP/SSH)"); self.geometry("600x500")
-        self.config_manager = config_manager; self.on_close_callback = on_close_callback; self.current_site_name = None  
-        self._create_widgets(); self._load_sites_to_listbox(); self.protocol("WM_DELETE_WINDOW", self._on_close)
-    def _create_widgets(self):
-        main_frame = ttk.Frame(self, padding="10"); main_frame.pack(fill='both', expand=True)
-        list_frame = ttk.Frame(main_frame); list_frame.pack(side=tk.LEFT, fill='y', padx=(0, 10))
-        ttk.Label(list_frame, text="Sites Salvos:").pack(anchor=tk.W)
-        self.sites_listbox = tk.Listbox(list_frame, height=15, width=25, exportselection=False)
-        self.sites_listbox.pack(fill='y', expand=True); self.sites_listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
-        form_frame = ttk.Labelframe(main_frame, text="Detalhes do Site", padding="10"); form_frame.pack(side=tk.LEFT, fill='both', expand=True)
-        ttk.Label(form_frame, text="Nome do Site (Único):").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.name_entry = ttk.Entry(form_frame, width=40); self.name_entry.grid(row=0, column=1, sticky=tk.EW, pady=5, padx=5)
-        ttk.Label(form_frame, text="Tipo de Conexão:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.connection_type_var = tk.StringVar(value="ftp")
-        connection_frame = ttk.Frame(form_frame); connection_frame.grid(row=1, column=1, sticky=tk.W, pady=5, padx=5)
-        self.ftp_radio = ttk.Radiobutton(connection_frame, text="FTP", variable=self.connection_type_var, value="ftp", command=self._on_connection_type_change)
-        self.ftp_radio.pack(side=tk.LEFT, padx=(0, 10))
-        self.ssh_radio = ttk.Radiobutton(connection_frame, text="SSH", variable=self.connection_type_var, value="ssh", command=self._on_connection_type_change)
-        self.ssh_radio.pack(side=tk.LEFT)
-        ttk.Label(form_frame, text="Host:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.host_entry = ttk.Entry(form_frame, width=40); self.host_entry.grid(row=2, column=1, sticky=tk.EW, pady=5, padx=5)
-        ttk.Label(form_frame, text="Porta:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.port_var = tk.IntVar(value=21); self.port_entry = ttk.Entry(form_frame, textvariable=self.port_var, width=10)
-        self.port_entry.grid(row=3, column=1, sticky=tk.W, pady=5, padx=5)
-        ttk.Label(form_frame, text="Usuário:").grid(row=4, column=0, sticky=tk.W, pady=5)
-        self.user_entry = ttk.Entry(form_frame, width=40); self.user_entry.grid(row=4, column=1, sticky=tk.EW, pady=5, padx=5)
-        ttk.Label(form_frame, text="Senha:").grid(row=5, column=0, sticky=tk.W, pady=5)
-        self.pass_entry = ttk.Entry(form_frame, width=40, show="*"); self.pass_entry.grid(row=5, column=1, sticky=tk.EW, pady=5, padx=5)
-        button_frame = ttk.Frame(form_frame); button_frame.grid(row=6, column=0, columnspan=2, pady=20)
-        self.save_btn = ttk.Button(button_frame, text="Salvar", command=self._save_site); self.save_btn.pack(side=tk.LEFT, padx=10)
-        self.delete_btn = ttk.Button(button_frame, text="Excluir", command=self._delete_site, state=tk.DISABLED)
-        self.delete_btn.pack(side=tk.LEFT, padx=10)
-        self.new_btn = ttk.Button(button_frame, text="Limpar (Novo)", command=self._clear_form); self.new_btn.pack(side=tk.LEFT, padx=10)
-        form_frame.columnconfigure(1, weight=1)
-    def _load_sites_to_listbox(self):
-        self.sites_listbox.delete(0, tk.END); sites = self.config_manager.get_sites()
-        for site_name in sorted(sites.keys()): self.sites_listbox.insert(tk.END, site_name)
-    def _on_connection_type_change(self):
-        """Atualiza a porta padrão quando o tipo de conexão muda."""
-        if self.connection_type_var.get() == "ssh":
-            if self.port_var.get() == 21:  # Se ainda está na porta padrão do FTP
-                self.port_var.set(22)
-        else:  # FTP
-            if self.port_var.get() == 22:  # Se ainda está na porta padrão do SSH
-                self.port_var.set(21)
-
-    def _on_listbox_select(self, event):
-        try:
-            selected_indices = self.sites_listbox.curselection();
-            if not selected_indices: return
-            self.current_site_name = self.sites_listbox.get(selected_indices[0])
-            site_details = self.config_manager.get_site_details(self.current_site_name); self._clear_form(clear_name=False)
-            self.name_entry.delete(0, tk.END); self.name_entry.insert(0, self.current_site_name)
-            self.connection_type_var.set(site_details.get('connection_type', 'ftp'))
-            self.host_entry.insert(0, site_details.get('host', '')); self.port_var.set(site_details.get('port', 21))
-            self.user_entry.insert(0, site_details.get('user', '')); self.pass_entry.insert(0, site_details.get('password', ''))
-            self.delete_btn.config(state=tk.NORMAL); self.name_entry.config(state=tk.DISABLED)  
-        except Exception as e: messagebox.showerror("Erro ao Carregar", f"{e}", parent=self)
-    def _clear_form(self, clear_name=True):
-        if clear_name: self.name_entry.config(state=tk.NORMAL); self.name_entry.delete(0, tk.END)
-        self.connection_type_var.set("ftp"); self.host_entry.delete(0, tk.END); self.port_var.set(21); self.user_entry.delete(0, tk.END); self.pass_entry.delete(0, tk.END)
-        self.sites_listbox.selection_clear(0, tk.END); self.delete_btn.config(state=tk.DISABLED); self.current_site_name = None; self.name_entry.focus()
-    def _save_site(self):
-        site_name = self.name_entry.get().strip(); host = self.host_entry.get().strip(); user = self.user_entry.get().strip(); password = self.pass_entry.get().strip()
-        connection_type = self.connection_type_var.get()
-        try: port = self.port_var.get()
-        except (tk.TclError, ValueError): messagebox.showerror("Erro de Validação", "Porta deve ser um número.", parent=self); return
-        if not all([site_name, host, user, password]): messagebox.showerror("Erro de Validação", "Todos os campos são obrigatórios.", parent=self); return
-        try:
-            name_to_save = self.current_site_name if self.name_entry.cget('state') == tk.DISABLED else site_name
-            if self.current_site_name is None and name_to_save in self.config_manager.get_sites():
-                 messagebox.showerror("Erro de Validação", f"O nome '{name_to_save}' já existe.", parent=self); return
-            self.config_manager.save_site(name_to_save, host, user, password, port, connection_type); messagebox.showinfo("Sucesso", f"Site '{name_to_save}' salvo.", parent=self)
-            self._load_sites_to_listbox(); self._clear_form()
-        except Exception as e: messagebox.showerror("Erro ao Salvar", f"{e}", parent=self)
-    def _delete_site(self):
-        if not self.current_site_name: return
-        if messagebox.askyesno("Confirmar Exclusão", f"Excluir o site '{self.current_site_name}'?\n(Isso também excluirá Favoritos e Tarefas de Sincronização associados a ele)", parent=self):
-            try:
-                self.config_manager.delete_site(self.current_site_name); messagebox.showinfo("Sucesso", f"Site '{self.current_site_name}' excluído.", parent=self)
-                self._load_sites_to_listbox(); self._clear_form()
-            except Exception as e: messagebox.showerror("Erro ao Excluir", f"{e}", parent=self)
-    def _on_close(self): self.on_close_callback(); self.grab_release(); self.destroy()
-
-
-# (CLASSE MODIFICADA) Janela Modal para Adicionar/Editar Sync Job
-class SyncJobManagerWindow(tk.Toplevel):
-    """
-    Janela Toplevel (modal) para adicionar ou editar
-    uma nova tarefa de Sincronização de Pasta.
-    """
-    
-    def __init__(self, parent, config_manager: ConfigManager, site_list: list, on_close_callback: callable):
-        super().__init__(parent)
-        self.transient(parent)  
-        self.grab_set()  
-        self.title("Adicionar Nova Tarefa de Sincronização")
-        self.geometry("600x300")
-
-        self.config_manager = config_manager
-        self.site_list = site_list
-        self.on_close_callback = on_close_callback
-        
-        self._create_widgets()
-        
-        # (NOVO) Adiciona o ícone também nas janelas filhas
-        try:
-            icon_path = resource_path("icon.ico")
-            self.iconbitmap(icon_path)
-        except Exception:
-            pass # Ignora se falhar
-        
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-
-    def _create_widgets(self):
-        form_frame = ttk.Frame(self, padding="15")
-        form_frame.pack(fill='both', expand=True)
-        form_frame.columnconfigure(1, weight=1)
-
-        # Nome da Tarefa
-        ttk.Label(form_frame, text="Nome da Tarefa (Único):").grid(row=0, column=0, sticky=tk.W, pady=8)
-        self.name_entry = ttk.Entry(form_frame, width=50)
-        self.name_entry.grid(row=0, column=1, sticky=tk.EW, pady=8, padx=5)
-
-        # Site FTP
-        ttk.Label(form_frame, text="Site FTP (Destino):").grid(row=1, column=0, sticky=tk.W, pady=8)
-        self.site_combo = ttk.Combobox(form_frame, state="readonly", values=self.site_list)
-        self.site_combo.grid(row=1, column=1, sticky=tk.EW, pady=8, padx=5)
-        if self.site_list: self.site_combo.current(0)
-
-        # Pasta Local
-        ttk.Label(form_frame, text="Pasta Local (Origem):").grid(row=2, column=0, sticky=tk.W, pady=8)
-        local_frame = ttk.Frame(form_frame)  
-        local_frame.grid(row=2, column=1, sticky=tk.EW, padx=5)
-        self.local_path_entry = ttk.Entry(local_frame, width=40)
-        self.local_path_entry.pack(side=tk.LEFT, fill='x', expand=True)
-        self.local_browse_btn = ttk.Button(local_frame, text="Procurar...", command=self._browse_local_folder)
-        self.local_browse_btn.pack(side=tk.LEFT, padx=5)
-
-        # Pasta Remota (MODIFICADO)
-        ttk.Label(form_frame, text="Pasta Remota (Destino):").grid(row=3, column=0, sticky=tk.W, pady=8)
-        remote_frame = ttk.Frame(form_frame) # Frame para Entry + Botão
-        remote_frame.grid(row=3, column=1, sticky=tk.EW, padx=5)
-        self.remote_path_entry = ttk.Entry(remote_frame, width=40)
-        self.remote_path_entry.pack(side=tk.LEFT, fill='x', expand=True)
-        self.remote_path_entry.insert(0, "/") # Padrão
-        self.remote_browse_btn = ttk.Button(remote_frame, text="Procurar...", command=self._browse_remote_folder)
-        self.remote_browse_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Botões
-        button_frame = ttk.Frame(form_frame)
-        button_frame.grid(row=4, column=0, columnspan=2, pady=20)
-        self.save_btn = ttk.Button(button_frame, text="Salvar Tarefa", command=self._save_job)
-        self.save_btn.pack(side=tk.LEFT, padx=10)
-        self.cancel_btn = ttk.Button(button_frame, text="Cancelar", command=self.destroy)
-        self.cancel_btn.pack(side=tk.LEFT, padx=10)
-
-    def _browse_local_folder(self):
-        dir_path = filedialog.askdirectory(title="Selecione a Pasta Local para Monitorar")
-        if dir_path:
-            self.local_path_entry.delete(0, tk.END)
-            self.local_path_entry.insert(0, os.path.normpath(dir_path).replace("\\", "/"))
-
-    # (NOVO) Função para o botão "Procurar..." da pasta remota
-    def _browse_remote_folder(self):
-        """Abre o navegador (FTP/SSH) para selecionar uma pasta de destino."""
-        site_name = self.site_combo.get()
-        if not site_name:
-            messagebox.showwarning("Site Necessário", "Por favor, selecione um Site (Destino) primeiro.", parent=self)
-            return
-
-        try:
-            site_config = self.config_manager.get_site_details(site_name)
-            if not site_config.get('password'):
-                messagebox.showerror("Erro de Configuração", f"Não foi possível carregar a senha para o site '{site_name}'.\nPor favor, re-salve a senha no Gerenciador de Sites.", parent=self)
-                return
-            
-            # Chama o navegador apropriado baseado no tipo de conexão
-            connection_type = site_config.get('connection_type', 'ftp')
-            if connection_type == 'ssh':
-                SSHBrowserWindow(self, site_config, self._on_remote_folder_selected, mode='directory')
-            else:
-                FTPBrowserWindow(self, site_config, self._on_remote_folder_selected, mode='directory')
-        
-        except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao abrir o navegador: {e}", parent=self)
-
-    # (NOVO) Callback para o navegador de pasta remota
-    def _on_remote_folder_selected(self, selected_path: str):
-        """Atualiza o campo de entrada com o caminho da pasta selecionada."""
-        if selected_path:
-            self.remote_path_entry.delete(0, tk.END)
-            self.remote_path_entry.insert(0, selected_path)
-            # Traz o foco de volta para a janela modal
-            self.lift()
-            self.grab_set()
-
-    def _save_job(self):
-        job_name = self.name_entry.get().strip()
-        site_name = self.site_combo.get()
-        local_path = self.local_path_entry.get().strip()
-        remote_path = self.remote_path_entry.get().strip()
-        if not all([job_name, site_name, local_path, remote_path]):
-            messagebox.showerror("Erro de Validação", "Todos os campos são obrigatórios.", parent=self)
-            return
-        if job_name in self.config_manager.get_sync_jobs():
-            messagebox.showerror("Erro de Validação", f"O nome de tarefa '{job_name}' já existe.", parent=self)
-            return
-        if not os.path.isdir(local_path):
-             messagebox.showerror("Erro de Validação", f"A pasta local '{local_path}' não existe.", parent=self)
-             return
-        try:
-            self.config_manager.save_sync_job(job_name, site_name, local_path, remote_path)
-            messagebox.showinfo("Sucesso", f"Tarefa '{job_name}' salva.", parent=self)
-            self.on_close_callback() # Atualiza o Treeview na Aba 2
-            self.destroy()
-        except Exception as e:
-            messagebox.showerror("Erro ao Salvar", f"{e}", parent=self)
-
 
 # --- Ponto de Entrada da Aplicação ---
 if __name__ == "__main__":
